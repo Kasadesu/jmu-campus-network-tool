@@ -1,0 +1,12 @@
+# 批处理文件必须保持 CRLF 换行，否则 cmd.exe 会吃掉行首字符导致脚本失效
+*.bat text eol=crlf
+*.cmd text eol=crlf
+
+# 文档统一 LF
+*.md   text eol=lf
+*.txt  text eol=lf
+
+# 二进制文件不做转换
+*.zip  binary
+*.7z   binary
+*.exe  binary

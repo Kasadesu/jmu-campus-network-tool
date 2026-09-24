@@ -1,0 +1,24 @@
+# Windows
+Thumbs.db
+ehthumbs.db
+Desktop.ini
+$RECYCLE.BIN/
+
+# 日志与临时文件
+*.log
+*.tmp
+~$*
+
+# 编辑器 / IDE
+.vscode/
+.idea/
+*.swp
+*.swo
+
+# 本地私有配置（可能含真实网络信息）
+config.local.json
+*.local.bat
+
+# 打包产物
+*.zip
+*.7z
