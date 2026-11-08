@@ -19,10 +19,11 @@ echo ============================================================
 echo.
 echo  将要执行的操作：
 echo    [1] 清理旧的校园网路由
-echo    [2] WLAN 设为静态 IP   172.19.245.138  (掩码 255.255.255.0)
-echo    [3] 默认网关           192.168.128.1
-echo    [4] DNS                172.17.8.32 / 172.17.8.33
-echo    [5] 新增持久路由       10.0.0.0/8     -^> 192.168.128.1
+echo    [2] 关闭网卡 DAD 检测  dadtransmits=0 (解决 Win11 冲突降级)
+echo    [3] WLAN 设为静态 IP   172.19.245.138  (掩码 255.255.255.0)
+echo    [4] 默认网关           192.168.128.1
+echo    [5] DNS                172.17.8.32 / 172.17.8.33
+echo    [6] 新增持久路由       10.0.0.0/8     -^> 192.168.128.1
 echo                           172.17.0.0/16  -^> 192.168.128.1
 echo.
 echo  这套配置的作用：
@@ -60,22 +61,25 @@ if errorlevel 1 (
 
 echo.
 echo ------------------------------------------------------------
-echo [1/5] 清理旧的校园网路由...
+echo [1/6] 清理旧的校园网路由...
 route delete 10.0.0.0 >nul 2>&1
 route delete 172.17.0.0 >nul 2>&1
 
-echo [2/5] 设置静态 IP 与默认网关...
+echo [2/6] 关闭 DAD 防网关 Proxy-ARP 冲突...
+netsh interface ipv4 set interface "WLAN" dadtransmits=0 >nul 2>&1
+
+echo [3/6] 设置静态 IP 与默认网关...
 netsh interface ip set address name="WLAN" static 172.19.245.138 255.255.255.0 192.168.128.1
 
-echo [3/5] 设置 DNS...
+echo [4/6] 设置 DNS...
 netsh interface ip set dns name="WLAN" static 172.17.8.32 primary
 netsh interface ip add dns name="WLAN" 172.17.8.33 index=2
 
-echo [4/5] 写入持久路由...
+echo [5/6] 写入持久路由...
 netsh interface ipv4 add route prefix=10.0.0.0/8 interface="WLAN" nexthop=192.168.128.1 metric=1 store=persistent
 netsh interface ipv4 add route prefix=172.17.0.0/16 interface="WLAN" nexthop=192.168.128.1 metric=1 store=persistent
 
-echo [5/5] 等待网络稳定...
+echo [6/6] 等待网络稳定...
 ping -n 3 127.0.0.1 >nul
 
 echo.

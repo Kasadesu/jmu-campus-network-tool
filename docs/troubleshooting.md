@@ -59,17 +59,28 @@ Signal   : 79%
 
 ---
 
-### 第 2 步：拿到 IP 了吗
+### 第 2 步：拿到 IP 了吗（与 Win11 DAD 状态检测）
 
 ```powershell
 netsh interface ipv4 show config "WLAN"
+Get-NetIPAddress -InterfaceAlias "WLAN" -AddressFamily IPv4
 ```
 
-正常情况下能看到 `IP Address` 和 `Default Gateway`。
+正常情况下能看到 `IP Address`、`Default Gateway` 以及 `AddressState: Preferred`。
 
-**若显示 `169.254.x.x`** → DHCP 没成功（AP 侧问题，或网卡配置被改坏）。先跑 `restore-dhcp.bat`。
-
-**若 `DHCP enabled: No`** → 当前是静态配置，检查 IP 是否属于该网络。
+- **若显示 `169.254.x.x` 或 `AddressState: Duplicate`**：
+  - 这通常是 **Windows 11 的 DAD（重复地址检测）机制与校园网网关的 Proxy-ARP 发生误报冲突** 所致。
+  - Windows 在配置静态 IP 时默认会发出 3 次 ARP Probe 探测是否重名；而校园网交换机若开启了 Proxy-ARP，会代为应答该 ARP 请求。
+  - Windows 收到应答后即刻判定“IP 冲突”，并在网卡上将此地址禁用，自动降级为 APIPA（`169.254.x.x`），导致网络卡顿 30~60 秒且无法上网。
+  - **排查与解决**：
+    ```powershell
+    # 查看当前 DAD 检测发送次数
+    netsh interface ipv4 show interface "WLAN" | findstr /I "dad"
+    # 关闭 DAD 检测（工具与最新脚本已内置此操作）
+    netsh interface ipv4 set interface "WLAN" dadtransmits=0
+    ```
+- **若为常规 DHCP 无法获取地址**：先跑 `restore-dhcp.bat` 或在工具中点「一键恢复 DHCP」。
+- **若 `DHCP enabled: No`**：当前为静态配置，检查设置的静态 IP 是否属于可用列表。
 
 ---
 
@@ -205,6 +216,12 @@ curl.exe -s -o NUL -w "%{http_code}" --max-time 10 http://10.14.0.10/
 ```powershell
 curl.exe -s --max-time 15 "http://ip-api.com/json/?fields=query,country,regionName,city,isp"
 ```
+
+### 误判四："静态 IP 总是卡顿掉线，肯定是这个 IP 被别人占用了"
+
+**不一定。** 在 Windows 11 下，绝大多数所谓的“IP 冲突”都是由于 **网关 Proxy-ARP 触发了 Win11 内置的 DAD（Duplicate Address Detection）机制**。
+系统默认 `dadtransmits=3`，在网卡刚赋上 IP 时向局域网广播查询。网关响应了广播后，Windows 就会触发假警报并主动放弃该 IP。
+只要将无线网卡设置 `dadtransmits=0`（最新版 `JmuNetHelper.exe` 和 `apply-campus-config.bat` 已默认集成），即可彻底解决这一问题。
 
 ---
 
