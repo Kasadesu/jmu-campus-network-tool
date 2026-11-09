@@ -30,7 +30,7 @@ namespace JmuNetHelper
 
     public class AppConfig
     {
-        public string SelectedIp = "172.19.245.138 (默认)";
+        public string SelectedIp = "自动分配最佳 IP (智能优选)";
         public string UserId = "";
         public string EncryptedPassword = "";
         public string Service = "电信宽带接入";
@@ -672,12 +672,14 @@ namespace JmuNetHelper
         [DllImport("dwmapi.dll")]
         private static extern int DwmSetWindowAttribute(IntPtr hwnd, int attr, ref int attrValue, int attrSize);
 
+        private const string AutoAllocOption = "自动分配最佳 IP (智能优选)";
+
         // 保持自动化测试反射契约的字段与方法
         private readonly string[] CandidateIps = new string[]
         {
-            "172.19.245.138 (默认)",
-            "172.19.245.150 (5楼备选)",
-            "172.19.245.157 (5楼备选)",
+            "172.19.245.138 (5楼·首选)",
+            "172.19.245.150 (5楼·备选)",
+            "172.19.245.157 (5楼·备选)",
             "172.19.244.138 (4楼)",
             "172.19.246.138 (6楼)",
             "172.19.240.138 (机房)",
@@ -689,6 +691,10 @@ namespace JmuNetHelper
         {
             if (string.IsNullOrEmpty(rawText)) return "";
             string trimmed = rawText.Trim();
+            if (trimmed.IndexOf("自动分配", StringComparison.OrdinalIgnoreCase) >= 0)
+            {
+                return "AUTO";
+            }
             int spaceIdx = trimmed.IndexOf(' ');
             if (spaceIdx > 0)
             {
@@ -1217,7 +1223,8 @@ namespace JmuNetHelper
             logContainer = (Border)root.FindName("logContainer");
             txtLog = (TextBox)root.FindName("txtLog");
 
-            // 填充下拉框数据
+            // 填充下拉框数据 (首项为自动优选)
+            cboIp.Items.Add(AutoAllocOption);
             foreach (string item in CandidateIps)
             {
                 cboIp.Items.Add(item);
@@ -1326,12 +1333,11 @@ namespace JmuNetHelper
         {
             if (!string.IsNullOrEmpty(appConfig.SelectedIp))
             {
-                if (appConfig.SelectedIp.Contains("·"))
-                {
-                    string pure = ExtractPureIp(appConfig.SelectedIp);
-                    appConfig.SelectedIp = (pure == "172.19.245.138") ? "172.19.245.138 (默认)" : pure;
-                }
                 cboIp.Text = appConfig.SelectedIp;
+            }
+            else
+            {
+                cboIp.SelectedIndex = 0;
             }
 
             txtUserId.Text = appConfig.UserId ?? "";
@@ -1465,6 +1471,34 @@ namespace JmuNetHelper
         {
             if (isWorking) return;
             string selectedIp = ExtractPureIp(cboIp.Text);
+            if (selectedIp == "AUTO")
+            {
+                lblLatencyResult.Text = "正在探测链路与认证网关...";
+                lblLatencyResult.Foreground = new SolidColorBrush(Color.FromRgb(113, 113, 122));
+                string bindIp = (currentNetInfo != null && currentNetInfo.Ipv4Address != "0.0.0.0") ? currentNetInfo.Ipv4Address : "";
+
+                Task.Factory.StartNew(delegate
+                {
+                    return NetworkInspector.TestTcpLatency(bindIp, "10.8.2.2", 80, 1500);
+                }).ContinueWith(delegate(Task<int> t)
+                {
+                    int ms = (!t.IsFaulted) ? t.Result : -1;
+                    if (ms > 0)
+                    {
+                        lblLatencyResult.Text = string.Format("认证服可达 ({0} ms) · 自动优选就绪", ms);
+                        lblLatencyResult.Foreground = new SolidColorBrush(Color.FromRgb(21, 128, 61));
+                        AppendLog(string.Format("网关链路握手良好 ({0} ms)，点击「切换为静态 IP」将自动绑定并认证", ms));
+                    }
+                    else
+                    {
+                        lblLatencyResult.Text = "点击切换将自动测速选优";
+                        lblLatencyResult.Foreground = new SolidColorBrush(Color.FromRgb(217, 119, 6));
+                        AppendLog("当前网关尚未直通，点击「切换为静态 IP」将自动为您轮询测试候选节点");
+                    }
+                }, TaskScheduler.FromCurrentSynchronizationContext());
+                return;
+            }
+
             IPAddress dummy;
             if (!IPAddress.TryParse(selectedIp, out dummy))
             {
@@ -1474,11 +1508,11 @@ namespace JmuNetHelper
 
             lblLatencyResult.Text = "正在测试...";
             lblLatencyResult.Foreground = new SolidColorBrush(Color.FromRgb(113, 113, 122));
-            string bindIp = (currentNetInfo != null && currentNetInfo.Ipv4Address != "0.0.0.0") ? currentNetInfo.Ipv4Address : "";
+            string bindIp2 = (currentNetInfo != null && currentNetInfo.Ipv4Address != "0.0.0.0") ? currentNetInfo.Ipv4Address : "";
 
             Task.Factory.StartNew(delegate
             {
-                return NetworkInspector.TestTcpLatency(bindIp, "10.8.2.2", 80, 1800);
+                return NetworkInspector.TestTcpLatency(bindIp2, "10.8.2.2", 80, 1800);
             }).ContinueWith(delegate(Task<int> t)
             {
                 int ms = (!t.IsFaulted) ? t.Result : -1;
@@ -1502,11 +1536,16 @@ namespace JmuNetHelper
             if (isWorking) return;
 
             string targetIp = ExtractPureIp(cboIp.Text);
-            IPAddress dummy;
-            if (!IPAddress.TryParse(targetIp, out dummy))
+            bool isAuto = (targetIp == "AUTO");
+
+            if (!isAuto)
             {
-                MessageBox.Show("静态 IP 格式无效，请检查后重试", "提示", MessageBoxButton.OK, MessageBoxImage.Warning);
-                return;
+                IPAddress dummy;
+                if (!IPAddress.TryParse(targetIp, out dummy))
+                {
+                    MessageBox.Show("静态 IP 格式无效，请检查后重试", "提示", MessageBoxButton.OK, MessageBoxImage.Warning);
+                    return;
+                }
             }
 
             if (currentNetInfo != null && currentNetInfo.HasWlan &&
@@ -1533,13 +1572,71 @@ namespace JmuNetHelper
 
             Task.Factory.StartNew(delegate
             {
-                bool ok = CampusConfigManager.ApplyStaticConfig(targetIp, ifName, AppendLog);
-                if (ok && autoLogin && !string.IsNullOrEmpty(uid) && !string.IsNullOrEmpty(pwd))
+                if (isAuto)
                 {
-                    Thread.Sleep(500);
-                    EPortalAuthClient.Login(targetIp, uid, pwd, svc, AppendLog);
+                    AppendLog("开始智能优选最佳空闲 IP...");
+                    bool anySuccess = false;
+                    foreach (string cand in CandidateIps)
+                    {
+                        string pureCand = ExtractPureIp(cand);
+                        AppendLog(string.Format("正在测试节点 {0}...", pureCand));
+                        bool ok = CampusConfigManager.ApplyStaticConfig(pureCand, ifName, AppendLog);
+                        if (!ok) continue;
+
+                        int latency = NetworkInspector.TestTcpLatency(pureCand, "10.8.2.2", 80, 1500);
+                        if (latency > 0)
+                        {
+                            AppendLog(string.Format("✓ 节点 {0} 路由畅通 (延迟 {1} ms)", pureCand, latency));
+                            if (autoLogin && !string.IsNullOrEmpty(uid) && !string.IsNullOrEmpty(pwd))
+                            {
+                                Thread.Sleep(300);
+                                LoginResult lr = EPortalAuthClient.Login(pureCand, uid, pwd, svc, AppendLog);
+                                if (lr.Success)
+                                {
+                                    AppendLog(string.Format("✓ 自动分配成功并完成认证: {0}", pureCand));
+                                    anySuccess = true;
+                                    break;
+                                }
+                                else if (lr.Message != null && lr.Message.Contains("密码"))
+                                {
+                                    anySuccess = true;
+                                    break;
+                                }
+                                else
+                                {
+                                    AppendLog(string.Format("节点 {0} 认证受阻 ({1})，自动尝试下一个候选...", pureCand, lr.Message));
+                                    continue;
+                                }
+                            }
+                            else
+                            {
+                                AppendLog(string.Format("✓ 自动分配成功: 已绑定最佳节点 {0}", pureCand));
+                                anySuccess = true;
+                                break;
+                            }
+                        }
+                        else
+                        {
+                            AppendLog(string.Format("节点 {0} 响应超时，自动切换备用...", pureCand));
+                        }
+                    }
+
+                    if (!anySuccess)
+                    {
+                        AppendLog("✕ 所有候选节点均未能连通，请检查 Wi-Fi 连接状态");
+                    }
+                    return anySuccess;
                 }
-                return ok;
+                else
+                {
+                    bool ok = CampusConfigManager.ApplyStaticConfig(targetIp, ifName, AppendLog);
+                    if (ok && autoLogin && !string.IsNullOrEmpty(uid) && !string.IsNullOrEmpty(pwd))
+                    {
+                        Thread.Sleep(500);
+                        EPortalAuthClient.Login(targetIp, uid, pwd, svc, AppendLog);
+                    }
+                    return ok;
+                }
             }).ContinueWith(delegate
             {
                 SetWorking(false);
@@ -1626,10 +1723,11 @@ namespace JmuNetHelper
             demo.DadTransmits = 0;
             demo.PortalLatencyMs = 1;
             UpdateDashboardUi(demo);
-            cboIp.Text = "172.19.245.138 (默认)";
+            cboIp.SelectedIndex = 0;
             chkRememberPwd.IsChecked = true;
             chkAutoLogin.IsChecked = true;
-            lblLatencyResult.Text = "";
+            lblLatencyResult.Text = "自动优选就绪 (1 ms)";
+            lblLatencyResult.Foreground = new SolidColorBrush(Color.FromRgb(21, 128, 61));
 
             FrameworkElement content = (FrameworkElement)this.Content;
             content.Width = 420;
