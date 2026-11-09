@@ -439,15 +439,15 @@ namespace JmuNetHelper
                 return false;
             }
 
-            log("正在配置校园网 DNS (172.17.8.32 / 172.17.8.33)...");
-            RunCmd("netsh", string.Format("interface ip set dns name=\"{0}\" static 172.17.8.32 primary", ifName), out output);
-            RunCmd("netsh", string.Format("interface ip add dns name=\"{0}\" 172.17.8.33 index=2", ifName), out output);
-
             log("正在添加校园网内网路由 (10.0.0.0/8, 172.17.0.0/16)...");
             RunCmd("netsh", string.Format("interface ipv4 add route prefix=10.0.0.0/8 interface=\"{0}\" nexthop=192.168.128.1 metric=1 store=persistent", ifName), out output);
             RunCmd("netsh", string.Format("interface ipv4 add route prefix=172.17.0.0/16 interface=\"{0}\" nexthop=192.168.128.1 metric=1 store=persistent", ifName), out output);
 
-            Thread.Sleep(700);
+            log("正在配置校园网 DNS (172.17.8.32 / 172.17.8.33)...");
+            RunCmd("netsh", string.Format("interface ip set dns name=\"{0}\" static 172.17.8.32 primary validate=no", ifName), out output);
+            RunCmd("netsh", string.Format("interface ip add dns name=\"{0}\" 172.17.8.33 index=2 validate=no", ifName), out output);
+
+            Thread.Sleep(500);
             log("已切换为静态 IP 模式");
             return true;
         }
@@ -677,14 +677,14 @@ namespace JmuNetHelper
         // 保持自动化测试反射契约的字段与方法
         private readonly string[] CandidateIps = new string[]
         {
-            "172.19.245.138 (5楼·首选)",
-            "172.19.245.150 (5楼·备选)",
-            "172.19.245.157 (5楼·备选)",
-            "172.19.244.138 (4楼)",
-            "172.19.246.138 (6楼)",
-            "172.19.240.138 (机房)",
-            "172.19.248.138 (8楼)",
-            "172.19.250.138 (10楼)"
+            "172.19.245.138 (推荐)",
+            "172.19.245.150",
+            "172.19.245.157",
+            "172.19.244.138",
+            "172.19.246.138",
+            "172.19.240.138",
+            "172.19.248.138",
+            "172.19.250.138"
         };
 
         private string ExtractPureIp(string rawText)
@@ -1548,17 +1548,28 @@ namespace JmuNetHelper
                 }
             }
 
-            if (currentNetInfo != null && currentNetInfo.HasWlan &&
-                !string.Equals(currentNetInfo.Ssid, "JMU-STU", StringComparison.OrdinalIgnoreCase) &&
-                currentNetInfo.Ssid != "未连接")
+            if (currentNetInfo != null && currentNetInfo.HasWlan)
             {
-                MessageBoxResult dr = MessageBox.Show(
-                    string.Format("当前连接的无线网为「{0}」而非「JMU-STU」。\n\n在非校园网环境下切换为静态 IP 会导致无法上网，是否继续？", currentNetInfo.Ssid),
-                    "环境确认",
-                    MessageBoxButton.YesNo,
-                    MessageBoxImage.Warning
-                );
-                if (dr != MessageBoxResult.Yes) return;
+                if (currentNetInfo.Status != OperationalStatus.Up || currentNetInfo.Ssid == "未连接")
+                {
+                    MessageBoxResult dr = MessageBox.Show(
+                        "检测到无线网卡当前处于「未连接」状态。\n\n请先连接校园 Wi-Fi「JMU-STU」后再进行配置或分配，是否仍然继续？",
+                        "Wi-Fi 未连接确认",
+                        MessageBoxButton.YesNo,
+                        MessageBoxImage.Warning
+                    );
+                    if (dr != MessageBoxResult.Yes) return;
+                }
+                else if (!string.Equals(currentNetInfo.Ssid, "JMU-STU", StringComparison.OrdinalIgnoreCase))
+                {
+                    MessageBoxResult dr = MessageBox.Show(
+                        string.Format("当前连接的无线网为「{0}」而非「JMU-STU」。\n\n在非校园网环境下切换为静态 IP 会导致无法上网，是否继续？", currentNetInfo.Ssid),
+                        "环境确认",
+                        MessageBoxButton.YesNo,
+                        MessageBoxImage.Warning
+                    );
+                    if (dr != MessageBoxResult.Yes) return;
+                }
             }
 
             SaveCurrentConfig();
@@ -1575,15 +1586,32 @@ namespace JmuNetHelper
                 if (isAuto)
                 {
                     AppendLog("开始智能优选最佳空闲 IP...");
+                    AppendLog("正在准备校园网路由与 DNS 环境...");
+
+                    string output;
+                    CampusConfigManager.RunCmd("route", "delete 10.0.0.0", out output);
+                    CampusConfigManager.RunCmd("route", "delete 172.17.0.0", out output);
+                    CampusConfigManager.RunCmd("netsh", string.Format("interface ipv4 set interface \"{0}\" dadtransmits=0", ifName), out output);
+                    CampusConfigManager.RunCmd("netsh", string.Format("interface ipv4 add route prefix=10.0.0.0/8 interface=\"{0}\" nexthop=192.168.128.1 metric=1 store=persistent", ifName), out output);
+                    CampusConfigManager.RunCmd("netsh", string.Format("interface ipv4 add route prefix=172.17.0.0/16 interface=\"{0}\" nexthop=192.168.128.1 metric=1 store=persistent", ifName), out output);
+                    CampusConfigManager.RunCmd("netsh", string.Format("interface ip set dns name=\"{0}\" static 172.17.8.32 primary validate=no", ifName), out output);
+                    CampusConfigManager.RunCmd("netsh", string.Format("interface ip add dns name=\"{0}\" 172.17.8.33 index=2 validate=no", ifName), out output);
+
                     bool anySuccess = false;
                     foreach (string cand in CandidateIps)
                     {
                         string pureCand = ExtractPureIp(cand);
                         AppendLog(string.Format("正在测试节点 {0}...", pureCand));
-                        bool ok = CampusConfigManager.ApplyStaticConfig(pureCand, ifName, AppendLog);
-                        if (!ok) continue;
+                        string ipArgs = string.Format("interface ip set address name=\"{0}\" static {1} 255.255.255.0 192.168.128.1", ifName, pureCand);
+                        if (!CampusConfigManager.RunCmd("netsh", ipArgs, out output))
+                        {
+                            AppendLog(string.Format("节点 {0} 写入失败，跳过", pureCand));
+                            continue;
+                        }
 
-                        int latency = NetworkInspector.TestTcpLatency(pureCand, "10.8.2.2", 80, 1500);
+                        Thread.Sleep(200);
+
+                        int latency = NetworkInspector.TestTcpLatency(pureCand, "10.8.2.2", 80, 800);
                         if (latency > 0)
                         {
                             AppendLog(string.Format("✓ 节点 {0} 路由畅通 (延迟 {1} ms)", pureCand, latency));
