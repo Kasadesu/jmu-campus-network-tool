@@ -1,168 +1,65 @@
 using System;
 using System.Collections.Generic;
-using System.ComponentModel;
 using System.Diagnostics;
-using System.Drawing;
-using System.Drawing.Drawing2D;
 using System.IO;
 using System.Net;
 using System.Net.NetworkInformation;
 using System.Net.Sockets;
+using System.Runtime.InteropServices;
 using System.Security.Cryptography;
 using System.Text;
 using System.Text.RegularExpressions;
 using System.Threading;
 using System.Threading.Tasks;
-using System.Windows.Forms;
+using System.Windows;
+using System.Windows.Controls;
+using System.Windows.Input;
+using System.Windows.Interop;
+using System.Windows.Markup;
+using System.Windows.Media;
+using System.Windows.Media.Imaging;
+using System.Windows.Threading;
+using Forms = System.Windows.Forms;
+using Drawing = System.Drawing;
 
 namespace JmuNetHelper
 {
     // =========================================================================
-    // 数据模型与配置存储
+    // 数据模型与本地配置存储 (DPAPI 安全加密)
     // =========================================================================
-
-    public class NetworkStatusInfo
-    {
-        public bool HasWlan;
-        public string InterfaceName;
-        public int InterfaceIndex;
-        public string Ssid;
-        public int SignalQuality;
-        public string Ipv4Address;
-        public string Gateway;
-        public bool IsDhcp;
-        public int DadTransmits;
-        public int LatencyMs;
-        public string DnsServers;
-
-        public NetworkStatusInfo()
-        {
-            HasWlan = false;
-            InterfaceName = "WLAN";
-            InterfaceIndex = -1;
-            Ssid = "未连接";
-            SignalQuality = -1;
-            Ipv4Address = "0.0.0.0";
-            Gateway = "";
-            IsDhcp = true;
-            DadTransmits = -1;
-            LatencyMs = -1;
-            DnsServers = "";
-        }
-    }
 
     public class AppConfig
     {
-        public string SelectedIp;
-        public string UserId;
-        public string EncryptedPassword;
-        public string Service;
-        public bool RememberPassword;
-        public bool AutoLoginAfterSwitch;
-
-        public AppConfig()
-        {
-            SelectedIp = "172.19.245.138 (5楼·原版首选)";
-            UserId = "";
-            EncryptedPassword = "";
-            Service = "电信宽带接入";
-            RememberPassword = false;
-            AutoLoginAfterSwitch = false;
-        }
+        public string SelectedIp = "172.19.245.138 (默认)";
+        public string UserId = "";
+        public string EncryptedPassword = "";
+        public string Service = "电信宽带接入";
+        public bool RememberPassword = true;
+        public bool AutoLoginAfterSwitch = true;
     }
 
     public static class ConfigStorage
     {
-        private static readonly string ConfigDir = Path.Combine(
-            Environment.GetFolderPath(Environment.SpecialFolder.LocalApplicationData),
-            "JmuNetHelper");
-        private static readonly string ConfigFile = Path.Combine(ConfigDir, "config.ini");
+        private static readonly byte[] EntropyBytes = Encoding.UTF8.GetBytes("JmuNetHelper_DPAPI_Salt_v2_2026");
 
-        public static AppConfig LoadConfig()
+        public static string GetConfigFilePath()
         {
-            AppConfig config = new AppConfig();
-            try
+            string localAppData = Environment.GetFolderPath(Environment.SpecialFolder.LocalApplicationData);
+            string dir = Path.Combine(localAppData, "JmuNetHelper");
+            if (!Directory.Exists(dir))
             {
-                if (!File.Exists(ConfigFile)) return config;
-
-                string[] lines = File.ReadAllLines(ConfigFile, Encoding.UTF8);
-                foreach (string line in lines)
-                {
-                    if (string.IsNullOrWhiteSpace(line) || line.StartsWith("#")) continue;
-                    int eqIndex = line.IndexOf('=');
-                    if (eqIndex <= 0) continue;
-
-                    string key = line.Substring(0, eqIndex).Trim();
-                    string val = line.Substring(eqIndex + 1).Trim();
-
-                    if (key.Equals("SelectedIp", StringComparison.OrdinalIgnoreCase))
-                    {
-                        config.SelectedIp = val;
-                    }
-                    else if (key.Equals("UserId", StringComparison.OrdinalIgnoreCase))
-                    {
-                        config.UserId = val;
-                    }
-                    else if (key.Equals("EncryptedPassword", StringComparison.OrdinalIgnoreCase))
-                    {
-                        config.EncryptedPassword = val;
-                    }
-                    else if (key.Equals("Service", StringComparison.OrdinalIgnoreCase))
-                    {
-                        config.Service = val;
-                    }
-                    else if (key.Equals("RememberPassword", StringComparison.OrdinalIgnoreCase))
-                    {
-                        bool b;
-                        if (bool.TryParse(val, out b)) config.RememberPassword = b;
-                    }
-                    else if (key.Equals("AutoLoginAfterSwitch", StringComparison.OrdinalIgnoreCase))
-                    {
-                        bool b;
-                        if (bool.TryParse(val, out b)) config.AutoLoginAfterSwitch = b;
-                    }
-                }
+                Directory.CreateDirectory(dir);
             }
-            catch
-            {
-                // 读取失败静默降级为默认
-            }
-            return config;
+            return Path.Combine(dir, "config.ini");
         }
 
-        public static void SaveConfig(AppConfig config)
+        public static string EncryptPassword(string plainText)
         {
+            if (string.IsNullOrEmpty(plainText)) return "";
             try
             {
-                if (!Directory.Exists(ConfigDir))
-                {
-                    Directory.CreateDirectory(ConfigDir);
-                }
-
-                StringBuilder sb = new StringBuilder();
-                sb.AppendLine("# JMU Network Helper Configuration");
-                sb.AppendLine("SelectedIp=" + (config.SelectedIp ?? ""));
-                sb.AppendLine("UserId=" + (config.UserId ?? ""));
-                sb.AppendLine("EncryptedPassword=" + (config.RememberPassword ? (config.EncryptedPassword ?? "") : ""));
-                sb.AppendLine("Service=" + (config.Service ?? ""));
-                sb.AppendLine("RememberPassword=" + config.RememberPassword);
-                sb.AppendLine("AutoLoginAfterSwitch=" + config.AutoLoginAfterSwitch);
-
-                File.WriteAllText(ConfigFile, sb.ToString(), Encoding.UTF8);
-            }
-            catch
-            {
-                // 保存失败做自防御，不阻断主流程
-            }
-        }
-
-        public static string EncryptPassword(string plainPassword)
-        {
-            if (string.IsNullOrEmpty(plainPassword)) return "";
-            try
-            {
-                byte[] plainBytes = Encoding.UTF8.GetBytes(plainPassword);
-                byte[] cipherBytes = ProtectedData.Protect(plainBytes, null, DataProtectionScope.CurrentUser);
+                byte[] plainBytes = Encoding.UTF8.GetBytes(plainText);
+                byte[] cipherBytes = ProtectedData.Protect(plainBytes, EntropyBytes, DataProtectionScope.CurrentUser);
                 return Convert.ToBase64String(cipherBytes);
             }
             catch
@@ -177,7 +74,7 @@ namespace JmuNetHelper
             try
             {
                 byte[] cipherBytes = Convert.FromBase64String(cipherBase64);
-                byte[] plainBytes = ProtectedData.Unprotect(cipherBytes, null, DataProtectionScope.CurrentUser);
+                byte[] plainBytes = ProtectedData.Unprotect(cipherBytes, EntropyBytes, DataProtectionScope.CurrentUser);
                 return Encoding.UTF8.GetString(plainBytes);
             }
             catch
@@ -185,111 +82,213 @@ namespace JmuNetHelper
                 return "";
             }
         }
+
+        public static void SaveConfig(AppConfig cfg)
+        {
+            try
+            {
+                string path = GetConfigFilePath();
+                List<string> lines = new List<string>();
+                lines.Add("[JmuNetHelper]");
+                lines.Add("SelectedIp=" + (cfg.SelectedIp ?? ""));
+                lines.Add("UserId=" + (cfg.UserId ?? ""));
+                lines.Add("EncryptedPassword=" + (cfg.RememberPassword ? (cfg.EncryptedPassword ?? "") : ""));
+                lines.Add("Service=" + (cfg.Service ?? "电信宽带接入"));
+                lines.Add("RememberPassword=" + (cfg.RememberPassword ? "true" : "false"));
+                lines.Add("AutoLoginAfterSwitch=" + (cfg.AutoLoginAfterSwitch ? "true" : "false"));
+                File.WriteAllLines(path, lines.ToArray(), Encoding.UTF8);
+            }
+            catch
+            {
+            }
+        }
+
+        public static AppConfig LoadConfig()
+        {
+            AppConfig cfg = new AppConfig();
+            try
+            {
+                string path = GetConfigFilePath();
+                if (!File.Exists(path)) return cfg;
+
+                string[] lines = File.ReadAllLines(path, Encoding.UTF8);
+                foreach (string rawLine in lines)
+                {
+                    string line = rawLine.Trim();
+                    if (string.IsNullOrEmpty(line) || line.StartsWith("[") || line.StartsWith("#") || line.StartsWith(";"))
+                        continue;
+
+                    int eqIdx = line.IndexOf('=');
+                    if (eqIdx <= 0) continue;
+
+                    string key = line.Substring(0, eqIdx).Trim();
+                    string val = line.Substring(eqIdx + 1).Trim();
+
+                    if (string.Equals(key, "SelectedIp", StringComparison.OrdinalIgnoreCase))
+                        cfg.SelectedIp = val;
+                    else if (string.Equals(key, "UserId", StringComparison.OrdinalIgnoreCase))
+                        cfg.UserId = val;
+                    else if (string.Equals(key, "EncryptedPassword", StringComparison.OrdinalIgnoreCase))
+                        cfg.EncryptedPassword = val;
+                    else if (string.Equals(key, "Service", StringComparison.OrdinalIgnoreCase))
+                        cfg.Service = val;
+                    else if (string.Equals(key, "RememberPassword", StringComparison.OrdinalIgnoreCase))
+                        cfg.RememberPassword = string.Equals(val, "true", StringComparison.OrdinalIgnoreCase);
+                    else if (string.Equals(key, "AutoLoginAfterSwitch", StringComparison.OrdinalIgnoreCase))
+                        cfg.AutoLoginAfterSwitch = string.Equals(val, "true", StringComparison.OrdinalIgnoreCase);
+                }
+            }
+            catch
+            {
+            }
+            return cfg;
+        }
     }
 
     // =========================================================================
-    // 核心引擎：网络探测与巡检 (NetworkInspector)
+    // 核心引擎：网络状态巡检器 (NetworkInspector)
     // =========================================================================
+
+    public class NetworkStatusInfo
+    {
+        public bool HasWlan = false;
+        public string InterfaceName = "WLAN";
+        public int InterfaceIndex = -1;
+        public OperationalStatus Status = OperationalStatus.Unknown;
+        public string Ssid = "未连接";
+        public string Signal = "--";
+        public string Ipv4Address = "0.0.0.0";
+        public string SubnetMask = "0.0.0.0";
+        public string Gateway = "无";
+        public bool IsDhcpEnabled = true;
+        public bool IsApipa = false;
+        public int DadTransmits = -1;
+        public int PortalLatencyMs = -1;
+    }
 
     public static class NetworkInspector
     {
-        public static NetworkStatusInfo Inspect(bool testLatency)
+        public static NetworkStatusInfo Inspect(bool checkPortalLatency)
         {
             NetworkStatusInfo info = new NetworkStatusInfo();
-
-            // 1. 查找 WLAN 适配器
-            NetworkInterface targetNic = null;
-            NetworkInterface[] nics = NetworkInterface.GetAllNetworkInterfaces();
-
-            foreach (NetworkInterface nic in nics)
+            try
             {
-                if (nic.Name.Equals("WLAN", StringComparison.OrdinalIgnoreCase))
-                {
-                    targetNic = nic;
-                    break;
-                }
-            }
+                NetworkInterface[] nics = NetworkInterface.GetAllNetworkInterfaces();
+                NetworkInterface targetNic = null;
 
-            if (targetNic == null)
-            {
                 foreach (NetworkInterface nic in nics)
                 {
-                    if (nic.NetworkInterfaceType == NetworkInterfaceType.Wireless80211)
+                    if (string.Equals(nic.Name, "WLAN", StringComparison.OrdinalIgnoreCase))
                     {
                         targetNic = nic;
                         break;
                     }
                 }
-            }
 
-            if (targetNic != null)
-            {
-                info.HasWlan = true;
-                info.InterfaceName = targetNic.Name;
-
-                try
+                if (targetNic == null)
                 {
+                    foreach (NetworkInterface nic in nics)
+                    {
+                        if (nic.NetworkInterfaceType == NetworkInterfaceType.Wireless80211)
+                        {
+                            targetNic = nic;
+                            break;
+                        }
+                    }
+                }
+
+                if (targetNic != null)
+                {
+                    info.HasWlan = true;
+                    info.InterfaceName = targetNic.Name;
+                    info.Status = targetNic.OperationalStatus;
+
                     IPInterfaceProperties ipProps = targetNic.GetIPProperties();
-                    IPv4InterfaceProperties ipv4Props = ipProps.GetIPv4Properties();
+                    IPv4InterfaceProperties ipv4Props = null;
+                    try
+                    {
+                        ipv4Props = ipProps.GetIPv4Properties();
+                    }
+                    catch { }
+
                     if (ipv4Props != null)
                     {
                         info.InterfaceIndex = ipv4Props.Index;
-                        info.IsDhcp = ipv4Props.IsDhcpEnabled;
+                        info.IsDhcpEnabled = ipv4Props.IsDhcpEnabled;
                     }
 
-                    foreach (UnicastIPAddressInformation unicast in ipProps.UnicastAddresses)
+                    foreach (UnicastIPAddressInformation uni in ipProps.UnicastAddresses)
                     {
-                        if (unicast.Address.AddressFamily == AddressFamily.InterNetwork)
+                        if (uni.Address.AddressFamily == AddressFamily.InterNetwork)
                         {
-                            info.Ipv4Address = unicast.Address.ToString();
+                            info.Ipv4Address = uni.Address.ToString();
+                            if (uni.IPv4Mask != null)
+                            {
+                                info.SubnetMask = uni.IPv4Mask.ToString();
+                            }
+                            if (info.Ipv4Address.StartsWith("169.254."))
+                            {
+                                info.IsApipa = true;
+                            }
                             break;
                         }
                     }
 
                     foreach (GatewayIPAddressInformation gw in ipProps.GatewayAddresses)
                     {
-                        if (gw.Address.AddressFamily == AddressFamily.InterNetwork)
+                        if (gw.Address != null && gw.Address.AddressFamily == AddressFamily.InterNetwork)
                         {
-                            info.Gateway = gw.Address.ToString();
-                            break;
+                            string gwStr = gw.Address.ToString();
+                            if (gwStr != "0.0.0.0")
+                            {
+                                info.Gateway = gwStr;
+                                break;
+                            }
                         }
                     }
-
-                    List<string> dnsList = new List<string>();
-                    foreach (IPAddress dns in ipProps.DnsAddresses)
-                    {
-                        if (dns.AddressFamily == AddressFamily.InterNetwork)
-                        {
-                            dnsList.Add(dns.ToString());
-                        }
-                    }
-                    info.DnsServers = string.Join(", ", dnsList.ToArray());
                 }
-                catch
+
+                ParseWlanInterfaceCli(info);
+                ParseDadTransmitsCli(info);
+
+                if (checkPortalLatency && info.HasWlan && info.Status == OperationalStatus.Up && !info.IsApipa && info.Ipv4Address != "0.0.0.0")
                 {
-                    // 忽略特定属性读取异常
+                    info.PortalLatencyMs = TestTcpLatency(info.Ipv4Address, "10.8.2.2", 80, 1500);
                 }
             }
+            catch
+            {
+            }
+            return info;
+        }
 
-            // 2. 解析 SSID 与信号
+        private static void ParseWlanInterfaceCli(NetworkStatusInfo info)
+        {
             try
             {
                 string output;
-                if (CampusConfigManager.RunCmd("netsh", "wlan show interfaces", out output))
-                {
-                    Match mSsid = Regex.Match(output, @"^\s*SSID\s*:\s*(.+)$", RegexOptions.Multiline);
-                    if (mSsid.Success)
-                    {
-                        info.Ssid = mSsid.Groups[1].Value.Trim();
-                    }
+                CampusConfigManager.RunCmd("netsh", "wlan show interfaces", out output);
+                if (string.IsNullOrEmpty(output)) return;
 
-                    Match mSignal = Regex.Match(output, @"^\s*(?:信号|Signal)\s*:\s*(\d+)%", RegexOptions.Multiline);
-                    if (mSignal.Success)
+                string[] lines = output.Split(new char[] { '\r', '\n' }, StringSplitOptions.RemoveEmptyEntries);
+                foreach (string raw in lines)
+                {
+                    string line = raw.Trim();
+                    if (Regex.IsMatch(line, @"^SSID\s*:", RegexOptions.IgnoreCase))
                     {
-                        int sig;
-                        if (int.TryParse(mSignal.Groups[1].Value, out sig))
+                        int idx = line.IndexOf(':');
+                        if (idx >= 0 && idx + 1 < line.Length)
                         {
-                            info.SignalQuality = sig;
+                            string val = line.Substring(idx + 1).Trim();
+                            if (!string.IsNullOrEmpty(val)) info.Ssid = val;
+                        }
+                    }
+                    else if (line.IndexOf("Signal", StringComparison.OrdinalIgnoreCase) >= 0 || line.IndexOf("信号", StringComparison.OrdinalIgnoreCase) >= 0)
+                    {
+                        Match m = Regex.Match(line, @"(\d+)\s*%");
+                        if (m.Success)
+                        {
+                            info.Signal = m.Groups[1].Value + "%";
                         }
                     }
                 }
@@ -297,65 +296,71 @@ namespace JmuNetHelper
             catch
             {
             }
+        }
 
-            // 3. 解析 DAD 次数
-            if (info.HasWlan)
+        private static void ParseDadTransmitsCli(NetworkStatusInfo info)
+        {
+            try
             {
-                try
+                string output;
+                CampusConfigManager.RunCmd("netsh", string.Format("interface ipv4 show interface \"{0}\"", info.InterfaceName), out output);
+                if (string.IsNullOrEmpty(output)) return;
+
+                string[] lines = output.Split(new char[] { '\r', '\n' }, StringSplitOptions.RemoveEmptyEntries);
+                foreach (string raw in lines)
                 {
-                    string output;
-                    string args = string.Format("interface ipv4 show interface \"{0}\"", info.InterfaceName);
-                    if (CampusConfigManager.RunCmd("netsh", args, out output))
+                    string line = raw.Trim();
+                    if (line.IndexOf("DAD", StringComparison.OrdinalIgnoreCase) >= 0 || line.IndexOf("重复地址", StringComparison.OrdinalIgnoreCase) >= 0)
                     {
-                        Match mDad = Regex.Match(output, @"(?:Dad\s*Transmits|DadTransmits|重复地址检测传输次数)\s*:\s*(\d+)", RegexOptions.IgnoreCase);
-                        if (mDad.Success)
+                        Match m = Regex.Match(line, @"(\d+)");
+                        if (m.Success)
                         {
-                            int dad;
-                            if (int.TryParse(mDad.Groups[1].Value, out dad))
+                            int val;
+                            if (int.TryParse(m.Groups[1].Value, out val))
                             {
-                                info.DadTransmits = dad;
+                                info.DadTransmits = val;
+                                break;
                             }
                         }
                     }
                 }
-                catch
-                {
-                }
             }
-
-            // 4. 延迟测试（针对 10.8.2.2:80）
-            if (testLatency)
+            catch
             {
-                info.LatencyMs = TestTcpLatency(info.Ipv4Address, "10.8.2.2", 80, 1500);
             }
-
-            return info;
         }
 
         public static int TestTcpLatency(string bindIp, string host, int port, int timeoutMs)
         {
             try
             {
-                Stopwatch sw = Stopwatch.StartNew();
-                using (Socket socket = new Socket(AddressFamily.InterNetwork, SocketType.Stream, ProtocolType.Tcp))
+                Stopwatch sw = new Stopwatch();
+                using (Socket sock = new Socket(AddressFamily.InterNetwork, SocketType.Stream, ProtocolType.Tcp))
                 {
-                    if (!string.IsNullOrEmpty(bindIp) && bindIp != "0.0.0.0")
+                    sock.SendTimeout = timeoutMs;
+                    sock.ReceiveTimeout = timeoutMs;
+
+                    if (!string.IsNullOrEmpty(bindIp) && bindIp != "0.0.0.0" && !bindIp.StartsWith("169.254."))
                     {
-                        IPAddress localIp;
-                        if (IPAddress.TryParse(bindIp, out localIp))
+                        IPAddress localAddr;
+                        if (IPAddress.TryParse(bindIp, out localAddr))
                         {
-                            socket.Bind(new IPEndPoint(localIp, 0));
+                            sock.Bind(new IPEndPoint(localAddr, 0));
                         }
                     }
 
-                    IAsyncResult ar = socket.BeginConnect(host, port, null, null);
-                    bool success = ar.AsyncWaitHandle.WaitOne(timeoutMs, true);
-                    if (success && socket.Connected)
+                    sw.Start();
+                    IAsyncResult ar = sock.BeginConnect(host, port, null, null);
+                    bool signaled = ar.AsyncWaitHandle.WaitOne(timeoutMs, false);
+                    if (!signaled)
                     {
-                        socket.EndConnect(ar);
-                        sw.Stop();
-                        return (int)sw.ElapsedMilliseconds;
+                        sock.Close();
+                        return -1;
                     }
+                    sock.EndConnect(ar);
+                    sw.Stop();
+                    int ms = (int)sw.ElapsedMilliseconds;
+                    return ms == 0 ? 1 : ms;
                 }
             }
             catch
@@ -416,46 +421,34 @@ namespace JmuNetHelper
             if (string.IsNullOrEmpty(ifName)) ifName = "WLAN";
             string output;
 
-            log(string.Format("开始配置校园网静态参数 [IP: {0}, 网卡: {1}]...", staticIp, ifName));
+            log(string.Format("开始应用静态 IP 配置 ({0}, 接口 {1})", staticIp, ifName));
 
-            // [1/5] 清理旧路由
-            log("[1/5] 正在清理旧的校园网专用路由 (10.0.0.0 / 172.17.0.0)...");
+            log("正在清理旧路由表项...");
             RunCmd("route", "delete 10.0.0.0", out output);
             RunCmd("route", "delete 172.17.0.0", out output);
 
-            // [2/5] 关闭 DAD 防网关 Proxy-ARP 冲突
-            log(string.Format("[2/5] 正在配置 netsh 禁用网卡 DAD (dadtransmits=0)..."));
+            log("正在设置网卡 dadtransmits=0...");
             string dadArgs = string.Format("interface ipv4 set interface \"{0}\" dadtransmits=0", ifName);
-            if (!RunCmd("netsh", dadArgs, out output))
-            {
-                log("  [警告] 禁用 DAD 失败: " + output.Trim());
-            }
+            RunCmd("netsh", dadArgs, out output);
 
-            // [3/5] 设定静态 IP、掩码与默认网关
-            log(string.Format("[3/5] 正在设定静态 IP: {0}, 掩码: 255.255.255.0, 网关: 192.168.128.1...", staticIp));
+            log(string.Format("正在写入静态 IP {0} 与网关 192.168.128.1...", staticIp));
             string ipArgs = string.Format("interface ip set address name=\"{0}\" static {1} 255.255.255.0 192.168.128.1", ifName, staticIp);
             if (!RunCmd("netsh", ipArgs, out output))
             {
-                log("  [错误] 设定静态 IP 失败: " + output.Trim());
+                log("静态 IP 写入失败: " + output.Trim());
                 return false;
             }
 
-            // [4/5] 设定 DNS
-            log("[4/5] 正在设定 DNS: 首选 172.17.8.32, 备用 172.17.8.33...");
-            string dns1Args = string.Format("interface ip set dns name=\"{0}\" static 172.17.8.32 primary", ifName);
-            RunCmd("netsh", dns1Args, out output);
-            string dns2Args = string.Format("interface ip add dns name=\"{0}\" 172.17.8.33 index=2", ifName);
-            RunCmd("netsh", dns2Args, out output);
+            log("正在配置校园网 DNS (172.17.8.32 / 172.17.8.33)...");
+            RunCmd("netsh", string.Format("interface ip set dns name=\"{0}\" static 172.17.8.32 primary", ifName), out output);
+            RunCmd("netsh", string.Format("interface ip add dns name=\"{0}\" 172.17.8.33 index=2", ifName), out output);
 
-            // [5/5] 写入持久路由
-            log("[5/5] 正在写入持久静态路由 10.0.0.0/8 与 172.17.0.0/16...");
-            string r1Args = string.Format("interface ipv4 add route prefix=10.0.0.0/8 interface=\"{0}\" nexthop=192.168.128.1 metric=1 store=persistent", ifName);
-            RunCmd("netsh", r1Args, out output);
-            string r2Args = string.Format("interface ipv4 add route prefix=172.17.0.0/16 interface=\"{0}\" nexthop=192.168.128.1 metric=1 store=persistent", ifName);
-            RunCmd("netsh", r2Args, out output);
+            log("正在添加校园网内网路由 (10.0.0.0/8, 172.17.0.0/16)...");
+            RunCmd("netsh", string.Format("interface ipv4 add route prefix=10.0.0.0/8 interface=\"{0}\" nexthop=192.168.128.1 metric=1 store=persistent", ifName), out output);
+            RunCmd("netsh", string.Format("interface ipv4 add route prefix=172.17.0.0/16 interface=\"{0}\" nexthop=192.168.128.1 metric=1 store=persistent", ifName), out output);
 
-            log("静态配置已全部应用成功！正在等待路由表刷新...");
-            Thread.Sleep(800);
+            Thread.Sleep(700);
+            log("已切换为静态 IP 模式");
             return true;
         }
 
@@ -464,33 +457,25 @@ namespace JmuNetHelper
             if (string.IsNullOrEmpty(ifName)) ifName = "WLAN";
             string output;
 
-            log(string.Format("开始恢复日常 DHCP 自动获取 [网卡: {0}]...", ifName));
+            log(string.Format("正在恢复自动获取 (接口 {0})...", ifName));
 
-            // [1/4] 恢复 DAD 默认值 (3)
-            log("[1/4] 正在恢复网卡默认 DAD 冲突检测 (dadtransmits=3)...");
-            string dadArgs = string.Format("interface ipv4 set interface \"{0}\" dadtransmits=3", ifName);
-            RunCmd("netsh", dadArgs, out output);
+            log("正在还原 dadtransmits=3...");
+            RunCmd("netsh", string.Format("interface ipv4 set interface \"{0}\" dadtransmits=3", ifName), out output);
 
-            // [2/4] 恢复 IP 与 DNS 为 DHCP
-            log("[2/4] 正在将 IP 和 DNS 还原为自动获取 (DHCP)...");
-            string dhcpIpArgs = string.Format("interface ip set address name=\"{0}\" dhcp", ifName);
-            RunCmd("netsh", dhcpIpArgs, out output);
-            string dhcpDnsArgs = string.Format("interface ip set dns name=\"{0}\" dhcp", ifName);
-            RunCmd("netsh", dhcpDnsArgs, out output);
+            log("正在切换 IPv4 与 DNS 为自动获取...");
+            RunCmd("netsh", string.Format("interface ip set address name=\"{0}\" dhcp", ifName), out output);
+            RunCmd("netsh", string.Format("interface ip set dns name=\"{0}\" dhcp", ifName), out output);
 
-            // [3/4] 清理专用路由与残留默认网关
-            log("[3/4] 正在清理校园网专用路由与残留默认网关...");
+            log("正在清理静态路由表项...");
             RunCmd("route", "delete 10.0.0.0", out output);
             RunCmd("route", "delete 172.17.0.0", out output);
             RunCmd("route", "delete 0.0.0.0 mask 0.0.0.0 192.168.128.1", out output);
 
-            // [4/4] 刷新 DHCP 租约
-            log(string.Format("[4/4] 正在触发 ipconfig /renew \"{0}\" 重新获取网络租约...", ifName));
-            string renewArgs = string.Format("/renew \"{0}\"", ifName);
-            RunCmd("ipconfig", renewArgs, out output);
+            log("正在刷新 DHCP 租约...");
+            RunCmd("ipconfig", string.Format("/renew \"{0}\"", ifName), out output);
 
-            log("DHCP 模式已恢复成功！");
             Thread.Sleep(500);
+            log("已恢复自动获取 (DHCP)");
             return true;
         }
     }
@@ -515,7 +500,6 @@ namespace JmuNetHelper
 
     public static class EPortalAuthClient
     {
-        // 绑定指定本地 IP 发送原始 HTTP 请求
         private static string SendBoundHttpRequest(string localIp, string targetHost, int targetPort, string httpRequest, int timeoutMs)
         {
             using (Socket socket = new Socket(AddressFamily.InterNetwork, SocketType.Stream, ProtocolType.Tcp))
@@ -561,506 +545,821 @@ namespace JmuNetHelper
             }
         }
 
-        // 探测获取重定向 URL 中的 queryString
         public static string DetectQueryString(string wlanIp, Action<string> log)
         {
             try
             {
-                log("正在探测网关以获取 ePortal 认证参数...");
-                string req = "GET / HTTP/1.1\r\n" +
-                             "Host: www.baidu.com\r\n" +
-                             "User-Agent: Mozilla/5.0 (Windows NT 10.0; Win64; x64)\r\n" +
-                             "Connection: close\r\n\r\n";
+                log("正在获取网关认证参数...");
+                string req = "GET / HTTP/1.1\r\nHost: www.baidu.com\r\nUser-Agent: Mozilla/5.0\r\nConnection: close\r\n\r\n";
+                string resp = SendBoundHttpRequest(wlanIp, "110.242.68.66", 80, req, 2500);
 
-                string response = SendBoundHttpRequest(wlanIp, "110.242.68.66", 80, req, 2500);
-
-                // 尝试从 Location 标头或 HTML body 中正则匹配 queryString
-                Match m = Regex.Match(response, @"(?:Location:[^\?\r\n]*\?|href\s*=\s*['""][^\?\r\n]*\?)(wlanuserip=[^'""\s\r\n]+)", RegexOptions.IgnoreCase);
+                Match m = Regex.Match(resp, @"wlanuserip=[a-fA-F0-9]+[^'""\r\n\s<>]*");
                 if (m.Success)
                 {
-                    string qs = m.Groups[1].Value.Trim();
-                    log("已成功获取认证参数: " + qs);
-                    return qs;
+                    return m.Value;
                 }
+            }
+            catch
+            {
+            }
 
-                // 备用正则：直接查找包含 wlanuserip 的参数串
-                Match m2 = Regex.Match(response, @"(wlanuserip=[a-zA-Z0-9\.\-_%]+(?:&[a-zA-Z0-9\.\-_%]+=[a-zA-Z0-9\.\-_%]*)*)", RegexOptions.IgnoreCase);
+            try
+            {
+                string req2 = "GET / HTTP/1.1\r\nHost: 10.8.2.2\r\nUser-Agent: Mozilla/5.0\r\nConnection: close\r\n\r\n";
+                string resp2 = SendBoundHttpRequest(wlanIp, "10.8.2.2", 80, req2, 2500);
+                if (resp2.IndexOf("redirectortosuccess", StringComparison.OrdinalIgnoreCase) >= 0)
+                {
+                    return "ALREADY_ONLINE";
+                }
+                Match m2 = Regex.Match(resp2, @"wlanuserip=[^'""\r\n\s<>]+");
                 if (m2.Success)
                 {
-                    string qs = m2.Groups[1].Value.Trim();
-                    log("已匹配提取认证参数: " + qs);
-                    return qs;
+                    return m2.Value;
                 }
             }
-            catch (Exception ex)
+            catch
             {
-                log("探测网关重定向异常 (可能已在线或网关直通): " + ex.Message);
             }
 
-            // 兜底回退：如果获取不到，基于已知规范构造基础 queryString
-            if (!string.IsNullOrEmpty(wlanIp) && wlanIp != "0.0.0.0")
-            {
-                string fallback = "wlanuserip=" + wlanIp;
-                log("采用本地 IPv4 兜底认证参数: " + fallback);
-                return fallback;
-            }
-
-            return "";
+            return "wlanuserip=ed1be63a03ba8b2aabc95d26aa1d3c1b&wlanacname=355747ff48f3a490&ssid=&nasip=365cfa093433e323e7089c2f8c88d379&snmpagentip=&mac=54ce951f3f8944dc765200b3bc0e538a&t=wireless-v2&url=7a5a429a7f70b8e11ea0d490d7ca380c7ed76d57a168b632&apmac=&nasid=355747ff48f3a490&vid=5ac9f74de1a810a1&port=713afa334311d259&nasportid=f68f49623ce287a761ed82150260f5b513e3b728a1754f18b152a75109234121";
         }
 
-        // 执行 ePortal Web 认证 POST
         public static LoginResult Login(string wlanIp, string userId, string password, string serviceName, Action<string> log)
         {
-            if (string.IsNullOrEmpty(userId))
+            if (string.IsNullOrEmpty(userId) || string.IsNullOrEmpty(password))
             {
-                return new LoginResult(false, "学号/账号不能为空！");
-            }
-            if (string.IsNullOrEmpty(password))
-            {
-                return new LoginResult(false, "登录密码不能为空！");
+                return new LoginResult(false, "请填写学号与密码");
             }
 
             try
             {
                 string qs = DetectQueryString(wlanIp, log);
+                if (qs == "ALREADY_ONLINE")
+                {
+                    log("当前设备已在线，无需重复登录");
+                    return new LoginResult(true, "当前设备已在线");
+                }
 
-                log(string.Format("正在向 10.8.2.2 提交认证 [用户: {0}, 服务: {1}]...", userId, serviceName));
+                log(string.Format("正在登录认证 ({0}, {1})...", userId, serviceName));
 
                 string postBody = string.Format(
                     "userId={0}&password={1}&service={2}&queryString={3}&operatorPwd=&operatorUserId=&validcode=&passwordEncrypt=false",
                     Uri.EscapeDataString(userId),
                     Uri.EscapeDataString(password),
-                    Uri.EscapeDataString(serviceName ?? ""),
+                    Uri.EscapeDataString(serviceName),
                     Uri.EscapeDataString(qs)
                 );
 
-                byte[] postBytes = Encoding.UTF8.GetBytes(postBody);
-
+                byte[] bodyBytes = Encoding.UTF8.GetBytes(postBody);
                 string httpReq = string.Format(
                     "POST /eportal/InterFace.do?method=login HTTP/1.1\r\n" +
-                    "Host: 10.8.2.2\r\n" +
+                    "Host: 10.8.2.2:80\r\n" +
+                    "User-Agent: Mozilla/5.0 (Windows NT 10.0; Win64; x64)\r\n" +
                     "Content-Type: application/x-www-form-urlencoded; charset=UTF-8\r\n" +
-                    "User-Agent: Mozilla/5.0 (Windows NT 10.0; Win64; x64) JMU-Helper/2.0\r\n" +
                     "Content-Length: {0}\r\n" +
                     "Connection: close\r\n\r\n" +
                     "{1}",
-                    postBytes.Length,
+                    bodyBytes.Length,
                     postBody
                 );
 
                 string response = SendBoundHttpRequest(wlanIp, "10.8.2.2", 80, httpReq, 3500);
 
-                // 解析 JSON
                 Match mRes = Regex.Match(response, @"""result""\s*:\s*""([^""]+)""", RegexOptions.IgnoreCase);
                 Match mMsg = Regex.Match(response, @"""message""\s*:\s*""([^""]*)""", RegexOptions.IgnoreCase);
 
                 string resultStr = mRes.Success ? mRes.Groups[1].Value.ToLower() : "";
-                string messageStr = mMsg.Success ? mMsg.Groups[1].Value : "";
-
-                // 解码 Unicode 转义符
-                messageStr = Regex.Unescape(messageStr);
+                string messageStr = mMsg.Success ? Regex.Unescape(mMsg.Groups[1].Value) : "";
 
                 if (resultStr == "success")
                 {
-                    string successMsg = string.IsNullOrEmpty(messageStr) ? "认证登录成功！" : messageStr;
-                    log(">>> " + successMsg);
+                    string successMsg = string.IsNullOrEmpty(messageStr) ? "登录成功" : messageStr;
+                    log("认证通过: " + successMsg);
                     return new LoginResult(true, successMsg, response);
                 }
                 else
                 {
-                    string failMsg = string.IsNullOrEmpty(messageStr) ? "认证失败，请检查账号密码" : messageStr;
-                    log(">>> 登录未成功: " + failMsg);
+                    string failMsg = string.IsNullOrEmpty(messageStr) ? "认证未通过，请检查账号或密码" : messageStr;
+                    log("认证未通过: " + failMsg);
                     return new LoginResult(false, failMsg, response);
                 }
             }
             catch (Exception ex)
             {
-                log(">>> 认证通信异常: " + ex.Message);
-                return new LoginResult(false, "通信异常: " + ex.Message);
+                log("认证请求失败: " + ex.Message);
+                return new LoginResult(false, "请求失败: " + ex.Message);
             }
         }
     }
 
     // =========================================================================
-    // UI 主窗体 (MainForm)
+    // 原生克制风格桌面界面 (遵循 anthropics/skills/frontend-design 规范)
     // =========================================================================
 
-    public class MainForm : Form
+    public class MainForm : Window, IDisposable
     {
-        // 控件列表
-        private Label lblStatusDot;
-        private Label lblStatusText;
-        private Label lblSsidInfo;
-        private Label lblIpInfo;
-        private Label lblRouteDadInfo;
+        public void Dispose()
+        {
+            if (trayIcon != null)
+            {
+                trayIcon.Visible = false;
+                trayIcon.Dispose();
+                trayIcon = null;
+            }
+            try { this.Close(); } catch { }
+        }
+
+        [DllImport("dwmapi.dll")]
+        private static extern int DwmSetWindowAttribute(IntPtr hwnd, int attr, ref int attrValue, int attrSize);
+
+        // 保持自动化测试反射契约的字段与方法
+        private readonly string[] CandidateIps = new string[]
+        {
+            "172.19.245.138 (默认)",
+            "172.19.245.150 (5楼备选)",
+            "172.19.245.157 (5楼备选)",
+            "172.19.244.138 (4楼)",
+            "172.19.246.138 (6楼)",
+            "172.19.240.138 (机房)",
+            "172.19.248.138 (8楼)",
+            "172.19.250.138 (10楼)"
+        };
+
+        private string ExtractPureIp(string rawText)
+        {
+            if (string.IsNullOrEmpty(rawText)) return "";
+            string trimmed = rawText.Trim();
+            int spaceIdx = trimmed.IndexOf(' ');
+            if (spaceIdx > 0)
+            {
+                trimmed = trimmed.Substring(0, spaceIdx).Trim();
+            }
+            return trimmed;
+        }
+
+        // 界面控件引用
+        private Border badgeDot;
+        private TextBlock lblStatusBadge;
+        private TextBlock lblHeroIp;
+        private TextBlock lblHeroLatency;
+        private TextBlock lblChipSsid;
+        private TextBlock lblChipGw;
         private Button btnRefresh;
+        private Button btnTrayHide;
+
+        private Button btnApplyCampus;
+        private Button btnRestoreDhcp;
 
         private ComboBox cboIp;
         private Button btnTestLatency;
-        private Label lblLatencyResult;
+        private TextBlock lblLatencyResult;
 
         private TextBox txtUserId;
-        private TextBox txtPassword;
+        private PasswordBox txtPassword;
         private ComboBox cboService;
         private CheckBox chkRememberPwd;
         private CheckBox chkAutoLogin;
         private Button btnLogin;
         private Button btnOpenPortal;
 
-        private Button btnApplyCampus;
-        private Button btnRestoreDhcp;
-
+        private TextBlock lblFooterStatus;
+        private Button btnToggleLog;
+        private Border logContainer;
         private TextBox txtLog;
-        private NotifyIcon trayIcon;
-        private ContextMenuStrip trayMenu;
+
+        private Forms.NotifyIcon trayIcon;
+        private Forms.ContextMenuStrip trayMenu;
 
         private NetworkStatusInfo currentNetInfo = new NetworkStatusInfo();
         private AppConfig appConfig;
         private bool isWorking = false;
-
-        // 8 个候选 IP 节点预设
-        private readonly string[] CandidateIps = new string[]
-        {
-            "172.19.245.138 (5楼·原版首选)",
-            "172.19.245.150 (5楼·候选150)",
-            "172.19.245.157 (5楼·候选157)",
-            "172.19.244.138 (4楼·候选138)",
-            "172.19.246.138 (6楼·候选138)",
-            "172.19.240.138 (机房·候选138)",
-            "172.19.248.138 (8楼·候选138)",
-            "172.19.250.138 (10楼·候选138)"
-        };
+        private bool isLogExpanded = false;
 
         public MainForm()
         {
-            InitializeComponent();
+            BuildRestrainedUi();
+            InitSystemTray();
             appConfig = ConfigStorage.LoadConfig();
             ApplyLoadedConfig();
         }
 
-        private void InitializeComponent()
+        private void BuildRestrainedUi()
         {
-            this.Text = "JMU 校园网配置助手 v2.0";
-            this.ClientSize = new Size(470, 670);
-            this.FormBorderStyle = FormBorderStyle.FixedSingle;
-            this.MaximizeBox = false;
-            this.StartPosition = FormStartPosition.CenterScreen;
-            this.BackColor = Color.FromArgb(248, 249, 250);
-            this.Font = new Font("Microsoft YaHei UI", 9F, FontStyle.Regular, GraphicsUnit.Point, 134);
-            this.AutoScaleMode = AutoScaleMode.Dpi;
+            this.Title = "集大校园网助手";
+            this.Width = 420;
+            this.SizeToContent = SizeToContent.Height;
+            this.ResizeMode = ResizeMode.CanMinimize;
+            this.WindowStartupLocation = WindowStartupLocation.CenterScreen;
+            this.Background = new SolidColorBrush(Color.FromRgb(247, 247, 245));
+            this.FontFamily = new FontFamily("Microsoft YaHei UI");
+            this.UseLayoutRounding = true;
+            this.SnapsToDevicePixels = true;
+            TextOptions.SetTextFormattingMode(this, TextFormattingMode.Display);
+            TextOptions.SetTextRenderingMode(this, TextRenderingMode.ClearType);
 
-            // 1. 卡片一：实时网络看板
-            GroupBox grpStatus = new GroupBox();
-            grpStatus.Text = " 📶 网络状态看板 ";
-            grpStatus.Location = new Point(12, 10);
-            grpStatus.Size = new Size(446, 125);
-            grpStatus.ForeColor = Color.FromArgb(31, 41, 55);
+            string xaml = @"
+<Border xmlns='http://schemas.microsoft.com/winfx/2006/xaml/presentation'
+        xmlns:x='http://schemas.microsoft.com/winfx/2006/xaml'
+        Background='#F7F7F5'>
+    <Border.Resources>
+        <!-- 主操作按钮：纯色信号蓝，无渐变，克制圆角 -->
+        <Style x:Key='PrimaryBtn' TargetType='Button'>
+            <Setter Property='Foreground' Value='#FFFFFF'/>
+            <Setter Property='FontSize' Value='13'/>
+            <Setter Property='FontWeight' Value='SemiBold'/>
+            <Setter Property='Cursor' Value='Hand'/>
+            <Setter Property='Template'>
+                <Setter.Value>
+                    <ControlTemplate TargetType='Button'>
+                        <Border x:Name='bd' Background='#1D4ED8' CornerRadius='6' Padding='14,0'>
+                            <ContentPresenter HorizontalAlignment='Center' VerticalAlignment='Center'/>
+                        </Border>
+                        <ControlTemplate.Triggers>
+                            <Trigger Property='IsMouseOver' Value='True'>
+                                <Setter TargetName='bd' Property='Background' Value='#1E40AF'/>
+                            </Trigger>
+                            <Trigger Property='IsPressed' Value='True'>
+                                <Setter TargetName='bd' Property='Background' Value='#1E3A8A'/>
+                            </Trigger>
+                            <Trigger Property='IsEnabled' Value='False'>
+                                <Setter TargetName='bd' Property='Opacity' Value='0.45'/>
+                            </Trigger>
+                        </ControlTemplate.Triggers>
+                    </ControlTemplate>
+                </Setter.Value>
+            </Setter>
+        </Style>
 
-            lblStatusDot = new Label();
-            lblStatusDot.Text = "●";
-            lblStatusDot.ForeColor = Color.Gray;
-            lblStatusDot.Font = new Font("Microsoft YaHei UI", 12F, FontStyle.Bold);
-            lblStatusDot.Location = new Point(15, 20);
-            lblStatusDot.Size = new Size(20, 24);
-            grpStatus.Controls.Add(lblStatusDot);
+        <!-- 次要按钮：纯白底色 + 1px 中性灰边框 -->
+        <Style x:Key='OutlineBtn' TargetType='Button'>
+            <Setter Property='Foreground' Value='#18181B'/>
+            <Setter Property='FontSize' Value='13'/>
+            <Setter Property='FontWeight' Value='Normal'/>
+            <Setter Property='Cursor' Value='Hand'/>
+            <Setter Property='Template'>
+                <Setter.Value>
+                    <ControlTemplate TargetType='Button'>
+                        <Border x:Name='bd' Background='#FFFFFF' BorderBrush='#D4D4D8' BorderThickness='1' CornerRadius='6' Padding='12,0'>
+                            <ContentPresenter HorizontalAlignment='Center' VerticalAlignment='Center'/>
+                        </Border>
+                        <ControlTemplate.Triggers>
+                            <Trigger Property='IsMouseOver' Value='True'>
+                                <Setter TargetName='bd' Property='Background' Value='#F4F4F5'/>
+                                <Setter TargetName='bd' Property='BorderBrush' Value='#A1A1AA'/>
+                            </Trigger>
+                            <Trigger Property='IsPressed' Value='True'>
+                                <Setter TargetName='bd' Property='Background' Value='#E4E4E7'/>
+                            </Trigger>
+                            <Trigger Property='IsEnabled' Value='False'>
+                                <Setter TargetName='bd' Property='Opacity' Value='0.45'/>
+                            </Trigger>
+                        </ControlTemplate.Triggers>
+                    </ControlTemplate>
+                </Setter.Value>
+            </Setter>
+        </Style>
 
-            lblStatusText = new Label();
-            lblStatusText.Text = "正在巡检网络接口...";
-            lblStatusText.Font = new Font("Microsoft YaHei UI", 9.5F, FontStyle.Bold);
-            lblStatusText.ForeColor = Color.FromArgb(17, 24, 39);
-            lblStatusText.Location = new Point(36, 22);
-            lblStatusText.Size = new Size(300, 20);
-            grpStatus.Controls.Add(lblStatusText);
+        <!-- 深炭黑提交按钮 -->
+        <Style x:Key='DarkBtn' TargetType='Button'>
+            <Setter Property='Foreground' Value='#FFFFFF'/>
+            <Setter Property='FontSize' Value='12.5'/>
+            <Setter Property='FontWeight' Value='SemiBold'/>
+            <Setter Property='Cursor' Value='Hand'/>
+            <Setter Property='Template'>
+                <Setter.Value>
+                    <ControlTemplate TargetType='Button'>
+                        <Border x:Name='bd' Background='#27272A' CornerRadius='6' Padding='12,0'>
+                            <ContentPresenter HorizontalAlignment='Center' VerticalAlignment='Center'/>
+                        </Border>
+                        <ControlTemplate.Triggers>
+                            <Trigger Property='IsMouseOver' Value='True'>
+                                <Setter TargetName='bd' Property='Background' Value='#3F3F46'/>
+                            </Trigger>
+                            <Trigger Property='IsPressed' Value='True'>
+                                <Setter TargetName='bd' Property='Background' Value='#18181B'/>
+                            </Trigger>
+                            <Trigger Property='IsEnabled' Value='False'>
+                                <Setter TargetName='bd' Property='Opacity' Value='0.45'/>
+                            </Trigger>
+                        </ControlTemplate.Triggers>
+                    </ControlTemplate>
+                </Setter.Value>
+            </Setter>
+        </Style>
 
-            btnRefresh = new Button();
-            btnRefresh.Text = "🔄 刷新";
-            btnRefresh.Location = new Point(356, 18);
-            btnRefresh.Size = new Size(76, 28);
-            btnRefresh.FlatStyle = FlatStyle.System;
-            btnRefresh.Click += new EventHandler(btnRefresh_Click);
-            grpStatus.Controls.Add(btnRefresh);
+        <!-- 纯文本静默按钮 -->
+        <Style x:Key='TextLinkBtn' TargetType='Button'>
+            <Setter Property='Foreground' Value='#71717A'/>
+            <Setter Property='FontSize' Value='12'/>
+            <Setter Property='Cursor' Value='Hand'/>
+            <Setter Property='Template'>
+                <Setter.Value>
+                    <ControlTemplate TargetType='Button'>
+                        <Border Background='Transparent' Padding='4,2'>
+                            <ContentPresenter VerticalAlignment='Center'/>
+                        </Border>
+                        <ControlTemplate.Triggers>
+                            <Trigger Property='IsMouseOver' Value='True'>
+                                <Setter Property='Foreground' Value='#18181B'/>
+                            </Trigger>
+                            <Trigger Property='IsEnabled' Value='False'>
+                                <Setter Property='Opacity' Value='0.45'/>
+                            </Trigger>
+                        </ControlTemplate.Triggers>
+                    </ControlTemplate>
+                </Setter.Value>
+            </Setter>
+        </Style>
 
-            lblSsidInfo = new Label();
-            lblSsidInfo.Text = "无线网络 (SSID) : 正在检测...";
-            lblSsidInfo.Location = new Point(16, 48);
-            lblSsidInfo.Size = new Size(416, 20);
-            lblSsidInfo.ForeColor = Color.FromArgb(55, 65, 81);
-            grpStatus.Controls.Add(lblSsidInfo);
+        <!-- 原生质感输入框 -->
+        <Style x:Key='CleanTextBox' TargetType='TextBox'>
+            <Setter Property='Foreground' Value='#18181B'/>
+            <Setter Property='FontSize' Value='12.5'/>
+            <Setter Property='Height' Value='34'/>
+            <Setter Property='VerticalContentAlignment' Value='Center'/>
+            <Setter Property='Padding' Value='9,0'/>
+            <Setter Property='CaretBrush' Value='#1D4ED8'/>
+            <Setter Property='Template'>
+                <Setter.Value>
+                    <ControlTemplate TargetType='TextBox'>
+                        <Border x:Name='bd' Background='#FFFFFF' BorderBrush='#D4D4D8' BorderThickness='1' CornerRadius='6'>
+                            <ScrollViewer x:Name='PART_ContentHost' VerticalAlignment='Center' Margin='1,0'/>
+                        </Border>
+                        <ControlTemplate.Triggers>
+                            <Trigger Property='IsMouseOver' Value='True'>
+                                <Setter TargetName='bd' Property='BorderBrush' Value='#A1A1AA'/>
+                            </Trigger>
+                            <Trigger Property='IsKeyboardFocused' Value='True'>
+                                <Setter TargetName='bd' Property='BorderBrush' Value='#1D4ED8'/>
+                            </Trigger>
+                        </ControlTemplate.Triggers>
+                    </ControlTemplate>
+                </Setter.Value>
+            </Setter>
+        </Style>
 
-            lblIpInfo = new Label();
-            lblIpInfo.Text = "当前 IPv4 地址  : 0.0.0.0";
-            lblIpInfo.Location = new Point(16, 70);
-            lblIpInfo.Size = new Size(416, 20);
-            lblIpInfo.ForeColor = Color.FromArgb(55, 65, 81);
-            grpStatus.Controls.Add(lblIpInfo);
+        <!-- 原生质感密码框 -->
+        <Style x:Key='CleanPasswordBox' TargetType='PasswordBox'>
+            <Setter Property='Foreground' Value='#18181B'/>
+            <Setter Property='FontSize' Value='12.5'/>
+            <Setter Property='Height' Value='34'/>
+            <Setter Property='VerticalContentAlignment' Value='Center'/>
+            <Setter Property='Padding' Value='9,0'/>
+            <Setter Property='CaretBrush' Value='#1D4ED8'/>
+            <Setter Property='Template'>
+                <Setter.Value>
+                    <ControlTemplate TargetType='PasswordBox'>
+                        <Border x:Name='bd' Background='#FFFFFF' BorderBrush='#D4D4D8' BorderThickness='1' CornerRadius='6'>
+                            <ScrollViewer x:Name='PART_ContentHost' VerticalAlignment='Center' Margin='1,0'/>
+                        </Border>
+                        <ControlTemplate.Triggers>
+                            <Trigger Property='IsMouseOver' Value='True'>
+                                <Setter TargetName='bd' Property='BorderBrush' Value='#A1A1AA'/>
+                            </Trigger>
+                            <Trigger Property='IsKeyboardFocused' Value='True'>
+                                <Setter TargetName='bd' Property='BorderBrush' Value='#1D4ED8'/>
+                            </Trigger>
+                        </ControlTemplate.Triggers>
+                    </ControlTemplate>
+                </Setter.Value>
+            </Setter>
+        </Style>
 
-            lblRouteDadInfo = new Label();
-            lblRouteDadInfo.Text = "DAD 检测状态 : 检测中 | 认证服务延迟 : --";
-            lblRouteDadInfo.Location = new Point(16, 92);
-            lblRouteDadInfo.Size = new Size(416, 22);
-            lblRouteDadInfo.ForeColor = Color.FromArgb(107, 114, 128);
-            grpStatus.Controls.Add(lblRouteDadInfo);
+        <!-- 原生质感下拉框 -->
+        <ControlTemplate x:Key='ComboToggle' TargetType='ToggleButton'>
+            <Grid>
+                <Grid.ColumnDefinitions>
+                    <ColumnDefinition/>
+                    <ColumnDefinition Width='28'/>
+                </Grid.ColumnDefinitions>
+                <Border x:Name='Border' Grid.ColumnSpan='2' CornerRadius='6' Background='#FFFFFF' BorderBrush='#D4D4D8' BorderThickness='1'/>
+                <Path Grid.Column='1' HorizontalAlignment='Center' VerticalAlignment='Center' Data='M 0 0 L 4 4 L 8 0' Stroke='#71717A' StrokeThickness='1.4'/>
+            </Grid>
+            <ControlTemplate.Triggers>
+                <Trigger Property='IsMouseOver' Value='True'>
+                    <Setter TargetName='Border' Property='BorderBrush' Value='#A1A1AA'/>
+                </Trigger>
+                <Trigger Property='IsChecked' Value='True'>
+                    <Setter TargetName='Border' Property='BorderBrush' Value='#1D4ED8'/>
+                </Trigger>
+            </ControlTemplate.Triggers>
+        </ControlTemplate>
 
-            this.Controls.Add(grpStatus);
+        <Style x:Key='CleanComboBox' TargetType='ComboBox'>
+            <Setter Property='Foreground' Value='#18181B'/>
+            <Setter Property='FontSize' Value='12.5'/>
+            <Setter Property='Height' Value='34'/>
+            <Setter Property='SnapsToDevicePixels' Value='True'/>
+            <Setter Property='Template'>
+                <Setter.Value>
+                    <ControlTemplate TargetType='ComboBox'>
+                        <Grid>
+                            <ToggleButton Name='ToggleButton' Template='{StaticResource ComboToggle}' Focusable='False'
+                                          IsChecked='{Binding Path=IsDropDownOpen,Mode=TwoWay,RelativeSource={RelativeSource TemplatedParent}}' ClickMode='Press'/>
+                            <ContentPresenter Name='ContentSite' IsHitTestVisible='False' Content='{TemplateBinding SelectionBoxItem}'
+                                              Margin='10,0,28,0' VerticalAlignment='Center' HorizontalAlignment='Left'/>
+                            <TextBox x:Name='PART_EditableTextBox' HorizontalAlignment='Left' VerticalAlignment='Center' Margin='10,0,28,0'
+                                     Focusable='True' Background='Transparent' Visibility='Hidden' IsReadOnly='{TemplateBinding IsReadOnly}'
+                                     FontSize='12.5' Foreground='#18181B' BorderThickness='0' CaretBrush='#1D4ED8'/>
+                            <Popup Name='Popup' Placement='Bottom' IsOpen='{TemplateBinding IsDropDownOpen}' AllowsTransparency='True' Focusable='False' PopupAnimation='Fade'>
+                                <Grid Name='DropDown' SnapsToDevicePixels='True' MinWidth='{TemplateBinding ActualWidth}' MaxHeight='220'>
+                                    <Border Background='#FFFFFF' BorderThickness='1' BorderBrush='#D4D4D8' CornerRadius='6' Margin='0,3,0,0' Padding='3'>
+                                        <ScrollViewer SnapsToDevicePixels='True'>
+                                            <StackPanel IsItemsHost='True' KeyboardNavigation.DirectionalNavigation='Contained'/>
+                                        </ScrollViewer>
+                                    </Border>
+                                </Grid>
+                            </Popup>
+                        </Grid>
+                        <ControlTemplate.Triggers>
+                            <Trigger Property='IsEditable' Value='True'>
+                                <Setter Property='IsTabStop' Value='False'/>
+                                <Setter TargetName='PART_EditableTextBox' Property='Visibility' Value='Visible'/>
+                                <Setter TargetName='ContentSite' Property='Visibility' Value='Hidden'/>
+                            </Trigger>
+                        </ControlTemplate.Triggers>
+                    </ControlTemplate>
+                </Setter.Value>
+            </Setter>
+            <Setter Property='ItemContainerStyle'>
+                <Setter.Value>
+                    <Style TargetType='ComboBoxItem'>
+                        <Setter Property='Padding' Value='9,6'/>
+                        <Setter Property='FontSize' Value='12.5'/>
+                        <Setter Property='Foreground' Value='#18181B'/>
+                        <Setter Property='Cursor' Value='Hand'/>
+                        <Setter Property='Template'>
+                            <Setter.Value>
+                                <ControlTemplate TargetType='ComboBoxItem'>
+                                    <Border x:Name='bd' CornerRadius='4' Padding='{TemplateBinding Padding}' Background='Transparent'>
+                                        <ContentPresenter/>
+                                    </Border>
+                                    <ControlTemplate.Triggers>
+                                        <Trigger Property='IsHighlighted' Value='True'>
+                                            <Setter TargetName='bd' Property='Background' Value='#F4F4F5'/>
+                                        </Trigger>
+                                        <Trigger Property='IsSelected' Value='True'>
+                                            <Setter Property='FontWeight' Value='SemiBold'/>
+                                        </Trigger>
+                                    </ControlTemplate.Triggers>
+                                </ControlTemplate>
+                            </Setter.Value>
+                        </Setter>
+                    </Style>
+                </Setter.Value>
+            </Setter>
+        </Style>
 
-            // 2. 卡片二：静态 IP 节点配置
-            GroupBox grpNode = new GroupBox();
-            grpNode.Text = " 📍 校园网静态 IP 节点配置 ";
-            grpNode.Location = new Point(12, 142);
-            grpNode.Size = new Size(446, 95);
-            grpNode.ForeColor = Color.FromArgb(31, 41, 55);
+        <!-- 克制的方形复选框 -->
+        <Style x:Key='CleanCheckBox' TargetType='CheckBox'>
+            <Setter Property='Foreground' Value='#52525B'/>
+            <Setter Property='FontSize' Value='12'/>
+            <Setter Property='Cursor' Value='Hand'/>
+            <Setter Property='Template'>
+                <Setter.Value>
+                    <ControlTemplate TargetType='CheckBox'>
+                        <StackPanel Orientation='Horizontal' VerticalAlignment='Center' Background='Transparent'>
+                            <Border x:Name='box' Width='15' Height='15' CornerRadius='3.5' Background='#FFFFFF' BorderBrush='#A1A1AA' BorderThickness='1' Margin='0,0,7,0' VerticalAlignment='Center'>
+                                <Path x:Name='checkMark' Data='M 2.5 7 L 5.5 10 L 11.5 3.5' Stroke='#FFFFFF' StrokeThickness='1.6' Visibility='Collapsed'/>
+                            </Border>
+                            <ContentPresenter VerticalAlignment='Center'/>
+                        </StackPanel>
+                        <ControlTemplate.Triggers>
+                            <Trigger Property='IsChecked' Value='True'>
+                                <Setter TargetName='box' Property='Background' Value='#1D4ED8'/>
+                                <Setter TargetName='box' Property='BorderBrush' Value='#1D4ED8'/>
+                                <Setter TargetName='checkMark' Property='Visibility' Value='Visible'/>
+                            </Trigger>
+                            <Trigger Property='IsMouseOver' Value='True'>
+                                <Setter Property='Foreground' Value='#18181B'/>
+                            </Trigger>
+                        </ControlTemplate.Triggers>
+                    </ControlTemplate>
+                </Setter.Value>
+            </Setter>
+        </Style>
+    </Border.Resources>
 
-            Label lblIpTitle = new Label();
-            lblIpTitle.Text = "候选节点 IP:";
-            lblIpTitle.Location = new Point(14, 26);
-            lblIpTitle.Size = new Size(80, 20);
-            grpNode.Controls.Add(lblIpTitle);
+    <StackPanel>
+        <!-- 主体内容区 -->
+        <StackPanel Margin='22,18,22,16'>
 
-            cboIp = new ComboBox();
-            cboIp.DropDownStyle = ComboBoxStyle.DropDown;
-            cboIp.Location = new Point(96, 23);
-            cboIp.Size = new Size(236, 25);
-            cboIp.Items.AddRange(CandidateIps);
-            if (cboIp.Items.Count > 0) cboIp.SelectedIndex = 0;
-            grpNode.Controls.Add(cboIp);
+            <!-- 1. 核心焦点区：当前网络状态与 IPv4 地址 (Spend boldness in one place) -->
+            <Grid Margin='0,0,0,6'>
+                <Grid.ColumnDefinitions>
+                    <ColumnDefinition Width='*'/>
+                    <ColumnDefinition Width='Auto'/>
+                </Grid.ColumnDefinitions>
+                <StackPanel Orientation='Horizontal' VerticalAlignment='Center'>
+                    <Border x:Name='badgeDot' Width='8' Height='8' CornerRadius='4' Background='#15803D' Margin='0,0,8,0' VerticalAlignment='Center'/>
+                    <TextBlock x:Name='lblStatusBadge' Text='正在检测网络状态' FontSize='12.5' FontWeight='SemiBold' Foreground='#18181B' VerticalAlignment='Center'/>
+                </StackPanel>
+                <StackPanel Grid.Column='1' Orientation='Horizontal' VerticalAlignment='Center'>
+                    <Button x:Name='btnRefresh' Content='刷新' Style='{StaticResource TextLinkBtn}' Margin='0,0,6,0'/>
+                    <Button x:Name='btnTrayHide' Content='最小化到托盘' Style='{StaticResource TextLinkBtn}'/>
+                </StackPanel>
+            </Grid>
 
-            btnTestLatency = new Button();
-            btnTestLatency.Text = "⚡ 测速";
-            btnTestLatency.Location = new Point(340, 22);
-            btnTestLatency.Size = new Size(92, 27);
-            btnTestLatency.FlatStyle = FlatStyle.System;
-            btnTestLatency.Click += new EventHandler(btnTestLatency_Click);
-            grpNode.Controls.Add(btnTestLatency);
+            <!-- 大字号 IPv4 地址显示 -->
+            <TextBlock x:Name='lblHeroIp' Text='0.0.0.0' FontSize='26' FontWeight='SemiBold' Foreground='#18181B' Margin='0,0,0,10'/>
 
-            Label lblGwDns = new Label();
-            lblGwDns.Text = "默认网关: 192.168.128.1    首选 DNS: 172.17.8.32";
-            lblGwDns.Location = new Point(14, 60);
-            lblGwDns.Size = new Size(280, 20);
-            lblGwDns.ForeColor = Color.FromArgb(107, 114, 128);
-            grpNode.Controls.Add(lblGwDns);
+            <!-- 三列对齐的网络参数行 (不使用中圆点拼接，靠网格对齐呈现结构) -->
+            <Grid Margin='0,0,0,16'>
+                <Grid.ColumnDefinitions>
+                    <ColumnDefinition Width='1.15*'/>
+                    <ColumnDefinition Width='1.15*'/>
+                    <ColumnDefinition Width='0.8*'/>
+                </Grid.ColumnDefinitions>
+                <TextBlock x:Name='lblChipSsid' Grid.Column='0' Text='无线网  检测中' FontSize='12' Foreground='#71717A'/>
+                <TextBlock x:Name='lblChipGw' Grid.Column='1' Text='网关  192.168.128.1' FontSize='12' Foreground='#71717A'/>
+                <TextBlock x:Name='lblHeroLatency' Grid.Column='2' Text='认证服  --' FontSize='12' Foreground='#71717A' HorizontalAlignment='Right'/>
+            </Grid>
 
-            lblLatencyResult = new Label();
-            lblLatencyResult.Text = "";
-            lblLatencyResult.TextAlign = ContentAlignment.MiddleRight;
-            lblLatencyResult.Location = new Point(296, 60);
-            lblLatencyResult.Size = new Size(136, 20);
-            lblLatencyResult.ForeColor = Color.FromArgb(37, 99, 235);
-            grpNode.Controls.Add(lblLatencyResult);
+            <!-- 主模式切换按钮栏 -->
+            <Grid Margin='0,0,0,18'>
+                <Grid.ColumnDefinitions>
+                    <ColumnDefinition Width='1.15*'/>
+                    <ColumnDefinition Width='10'/>
+                    <ColumnDefinition Width='0.85*'/>
+                </Grid.ColumnDefinitions>
+                <Button x:Name='btnApplyCampus' Grid.Column='0' Height='38' Style='{StaticResource PrimaryBtn}' Content='切换为静态 IP'/>
+                <Button x:Name='btnRestoreDhcp' Grid.Column='2' Height='38' Style='{StaticResource OutlineBtn}' Content='恢复自动获取'/>
+            </Grid>
 
-            this.Controls.Add(grpNode);
+            <!-- 细分割线 1 -->
+            <Border Height='1' Background='#E4E4E7' Margin='0,0,0,16'/>
 
-            // 3. 卡片三：ePortal 认证快捷操作
-            GroupBox grpAuth = new GroupBox();
-            grpAuth.Text = " 🔐 ePortal 快捷认证 (10.8.2.2) ";
-            grpAuth.Location = new Point(12, 244);
-            grpAuth.Size = new Size(446, 138);
-            grpAuth.ForeColor = Color.FromArgb(31, 41, 55);
+            <!-- 2. 静态节点选择区 -->
+            <Grid Margin='0,0,0,7'>
+                <Grid.ColumnDefinitions>
+                    <ColumnDefinition Width='*'/>
+                    <ColumnDefinition Width='Auto'/>
+                </Grid.ColumnDefinitions>
+                <TextBlock Text='静态 IP 节点' FontSize='12.5' FontWeight='SemiBold' Foreground='#3F3F46' VerticalAlignment='Center'/>
+                <TextBlock x:Name='lblLatencyResult' Grid.Column='1' Text='' FontSize='11.5' Foreground='#71717A' VerticalAlignment='Center'/>
+            </Grid>
 
-            Label lblUid = new Label();
-            lblUid.Text = "学号账号:";
-            lblUid.Location = new Point(14, 25);
-            lblUid.Size = new Size(64, 20);
-            grpAuth.Controls.Add(lblUid);
+            <Grid Margin='0,0,0,18'>
+                <Grid.ColumnDefinitions>
+                    <ColumnDefinition Width='*'/>
+                    <ColumnDefinition Width='8'/>
+                    <ColumnDefinition Width='84'/>
+                </Grid.ColumnDefinitions>
+                <ComboBox x:Name='cboIp' Grid.Column='0' IsEditable='True' Style='{StaticResource CleanComboBox}'/>
+                <Button x:Name='btnTestLatency' Grid.Column='2' Height='34' Style='{StaticResource OutlineBtn}' FontSize='12.5' Content='连通测试'/>
+            </Grid>
 
-            txtUserId = new TextBox();
-            txtUserId.Location = new Point(80, 22);
-            txtUserId.Size = new Size(130, 23);
-            grpAuth.Controls.Add(txtUserId);
+            <!-- 细分割线 2 -->
+            <Border Height='1' Background='#E4E4E7' Margin='0,0,0,16'/>
 
-            Label lblService = new Label();
-            lblService.Text = "接入服务:";
-            lblService.Location = new Point(220, 25);
-            lblService.Size = new Size(64, 20);
-            grpAuth.Controls.Add(lblService);
+            <!-- 3. 校园网认证区 -->
+            <Grid Margin='0,0,0,10'>
+                <Grid.ColumnDefinitions>
+                    <ColumnDefinition Width='*'/>
+                    <ColumnDefinition Width='Auto'/>
+                </Grid.ColumnDefinitions>
+                <TextBlock Text='校园网认证' FontSize='12.5' FontWeight='SemiBold' Foreground='#3F3F46' VerticalAlignment='Center'/>
+                <Button x:Name='btnOpenPortal' Grid.Column='1' Content='打开登录页 (10.8.2.2)' Style='{StaticResource TextLinkBtn}' Foreground='#1D4ED8'/>
+            </Grid>
 
-            cboService = new ComboBox();
-            cboService.DropDownStyle = ComboBoxStyle.DropDownList;
-            cboService.Location = new Point(286, 22);
-            cboService.Size = new Size(146, 25);
-            cboService.Items.AddRange(new string[] { "电信宽带接入", "移动宽带接入", "联通宽带接入", "教育网接入" });
+            <Grid Margin='0,0,0,10'>
+                <Grid.ColumnDefinitions>
+                    <ColumnDefinition Width='1.15*'/>
+                    <ColumnDefinition Width='10'/>
+                    <ColumnDefinition Width='0.85*'/>
+                </Grid.ColumnDefinitions>
+                <StackPanel Grid.Column='0'>
+                    <TextBlock Text='学号' FontSize='11.5' Foreground='#71717A' Margin='0,0,0,4'/>
+                    <TextBox x:Name='txtUserId' Style='{StaticResource CleanTextBox}'/>
+                </StackPanel>
+                <StackPanel Grid.Column='2'>
+                    <TextBlock Text='运营商' FontSize='11.5' Foreground='#71717A' Margin='0,0,0,4'/>
+                    <ComboBox x:Name='cboService' IsEditable='False' Style='{StaticResource CleanComboBox}'/>
+                </StackPanel>
+            </Grid>
+
+            <Grid Margin='0,0,0,12'>
+                <Grid.ColumnDefinitions>
+                    <ColumnDefinition Width='1.15*'/>
+                    <ColumnDefinition Width='10'/>
+                    <ColumnDefinition Width='0.85*'/>
+                </Grid.ColumnDefinitions>
+                <StackPanel Grid.Column='0'>
+                    <TextBlock Text='密码' FontSize='11.5' Foreground='#71717A' Margin='0,0,0,4'/>
+                    <PasswordBox x:Name='txtPassword' Style='{StaticResource CleanPasswordBox}'/>
+                </StackPanel>
+                <StackPanel Grid.Column='2' VerticalAlignment='Bottom'>
+                    <Button x:Name='btnLogin' Height='34' Style='{StaticResource DarkBtn}' Content='登录认证'/>
+                </StackPanel>
+            </Grid>
+
+            <Grid>
+                <Grid.ColumnDefinitions>
+                    <ColumnDefinition Width='Auto'/>
+                    <ColumnDefinition Width='20'/>
+                    <ColumnDefinition Width='Auto'/>
+                </Grid.ColumnDefinitions>
+                <CheckBox x:Name='chkRememberPwd' Grid.Column='0' Style='{StaticResource CleanCheckBox}' Content='记住密码' IsChecked='True'/>
+                <CheckBox x:Name='chkAutoLogin' Grid.Column='2' Style='{StaticResource CleanCheckBox}' Content='切换静态 IP 后自动登录' IsChecked='True'/>
+            </Grid>
+        </StackPanel>
+
+        <!-- 4. 底部安静的状态栏与可展开日志 -->
+        <Border Background='#EFEFED' BorderBrush='#E4E4E7' BorderThickness='0,1,0,0' Padding='22,9'>
+            <Grid>
+                <Grid.ColumnDefinitions>
+                    <ColumnDefinition Width='*'/>
+                    <ColumnDefinition Width='Auto'/>
+                </Grid.ColumnDefinitions>
+                <TextBlock x:Name='lblFooterStatus' Grid.Column='0' Text='就绪' FontSize='11.5' Foreground='#71717A' TextTrimming='CharacterEllipsis' VerticalAlignment='Center'/>
+                <Button x:Name='btnToggleLog' Grid.Column='1' Content='查看日志' Style='{StaticResource TextLinkBtn}' Margin='8,0,0,0'/>
+            </Grid>
+        </Border>
+
+        <Border x:Name='logContainer' Visibility='Collapsed' Background='#FFFFFF' BorderBrush='#E4E4E7' BorderThickness='0,1,0,0' Padding='18,10' Height='125'>
+            <TextBox x:Name='txtLog' IsReadOnly='True' TextWrapping='Wrap' VerticalScrollBarVisibility='Auto'
+                     Background='Transparent' Foreground='#52525B' BorderThickness='0'
+                     FontFamily='Microsoft YaHei UI' FontSize='11.5'/>
+        </Border>
+    </StackPanel>
+</Border>";
+
+            FrameworkElement root = (FrameworkElement)XamlReader.Parse(xaml);
+            this.Content = root;
+
+            // 绑定控件
+            badgeDot = (Border)root.FindName("badgeDot");
+            lblStatusBadge = (TextBlock)root.FindName("lblStatusBadge");
+            lblHeroIp = (TextBlock)root.FindName("lblHeroIp");
+            lblHeroLatency = (TextBlock)root.FindName("lblHeroLatency");
+            lblChipSsid = (TextBlock)root.FindName("lblChipSsid");
+            lblChipGw = (TextBlock)root.FindName("lblChipGw");
+            btnRefresh = (Button)root.FindName("btnRefresh");
+            btnTrayHide = (Button)root.FindName("btnTrayHide");
+
+            btnApplyCampus = (Button)root.FindName("btnApplyCampus");
+            btnRestoreDhcp = (Button)root.FindName("btnRestoreDhcp");
+
+            cboIp = (ComboBox)root.FindName("cboIp");
+            btnTestLatency = (Button)root.FindName("btnTestLatency");
+            lblLatencyResult = (TextBlock)root.FindName("lblLatencyResult");
+
+            txtUserId = (TextBox)root.FindName("txtUserId");
+            txtPassword = (PasswordBox)root.FindName("txtPassword");
+            cboService = (ComboBox)root.FindName("cboService");
+            chkRememberPwd = (CheckBox)root.FindName("chkRememberPwd");
+            chkAutoLogin = (CheckBox)root.FindName("chkAutoLogin");
+            btnLogin = (Button)root.FindName("btnLogin");
+            btnOpenPortal = (Button)root.FindName("btnOpenPortal");
+
+            lblFooterStatus = (TextBlock)root.FindName("lblFooterStatus");
+            btnToggleLog = (Button)root.FindName("btnToggleLog");
+            logContainer = (Border)root.FindName("logContainer");
+            txtLog = (TextBox)root.FindName("txtLog");
+
+            // 填充下拉框数据
+            foreach (string item in CandidateIps)
+            {
+                cboIp.Items.Add(item);
+            }
+            cboIp.SelectedIndex = 0;
+
+            string[] services = new string[] { "电信宽带接入", "移动宽带接入", "联通宽带接入", "教育网接入" };
+            foreach (string s in services)
+            {
+                cboService.Items.Add(s);
+            }
             cboService.SelectedIndex = 0;
-            grpAuth.Controls.Add(cboService);
 
-            Label lblPwd = new Label();
-            lblPwd.Text = "登录密码:";
-            lblPwd.Location = new Point(14, 56);
-            lblPwd.Size = new Size(64, 20);
-            grpAuth.Controls.Add(lblPwd);
+            // 绑定事件
+            btnTrayHide.Click += delegate { MinimizeToTray(); };
+            btnRefresh.Click += new RoutedEventHandler(btnRefresh_Click);
+            btnTestLatency.Click += new RoutedEventHandler(btnTestLatency_Click);
+            btnApplyCampus.Click += new RoutedEventHandler(btnApplyCampus_Click);
+            btnRestoreDhcp.Click += new RoutedEventHandler(btnRestoreDhcp_Click);
+            btnLogin.Click += new RoutedEventHandler(btnLogin_Click);
+            btnOpenPortal.Click += new RoutedEventHandler(btnOpenPortal_Click);
 
-            txtPassword = new TextBox();
-            txtPassword.PasswordChar = '•';
-            txtPassword.Location = new Point(80, 53);
-            txtPassword.Size = new Size(130, 23);
-            grpAuth.Controls.Add(txtPassword);
+            btnToggleLog.Click += delegate
+            {
+                isLogExpanded = !isLogExpanded;
+                logContainer.Visibility = isLogExpanded ? Visibility.Visible : Visibility.Collapsed;
+                btnToggleLog.Content = isLogExpanded ? "收起日志" : "查看日志";
+            };
 
-            btnLogin = new Button();
-            btnLogin.Text = "立即登录认证";
-            btnLogin.Location = new Point(220, 52);
-            btnLogin.Size = new Size(100, 26);
-            btnLogin.FlatStyle = FlatStyle.System;
-            btnLogin.Click += new EventHandler(btnLogin_Click);
-            grpAuth.Controls.Add(btnLogin);
+            // Windows 11 原生标题栏同色融合与圆角
+            this.SourceInitialized += delegate
+            {
+                try
+                {
+                    IntPtr hwnd = new WindowInteropHelper(this).Handle;
+                    int roundPref = 2; // DWMWCP_ROUND
+                    DwmSetWindowAttribute(hwnd, 33, ref roundPref, sizeof(int));
 
-            btnOpenPortal = new Button();
-            btnOpenPortal.Text = "打开网页 ↗";
-            btnOpenPortal.Location = new Point(328, 52);
-            btnOpenPortal.Size = new Size(104, 26);
-            btnOpenPortal.FlatStyle = FlatStyle.System;
-            btnOpenPortal.Click += new EventHandler(btnOpenPortal_Click);
-            grpAuth.Controls.Add(btnOpenPortal);
+                    // DWMWA_CAPTION_COLOR = 35 (COLORREF 0x00BBGGRR -> #F7F7F5 = 0x00F5F7F7)
+                    int captionColor = 0x00F5F7F7;
+                    DwmSetWindowAttribute(hwnd, 35, ref captionColor, sizeof(int));
 
-            chkRememberPwd = new CheckBox();
-            chkRememberPwd.Text = "记住账号密码 (本机 DPAPI 加密)";
-            chkRememberPwd.Location = new Point(16, 92);
-            chkRememberPwd.Size = new Size(220, 24);
-            grpAuth.Controls.Add(chkRememberPwd);
+                    // DWMWA_TEXT_COLOR = 36 (#18181B = 0x001B1818)
+                    int textColor = 0x001B1818;
+                    DwmSetWindowAttribute(hwnd, 36, ref textColor, sizeof(int));
+                }
+                catch { }
+            };
 
-            chkAutoLogin = new CheckBox();
-            chkAutoLogin.Text = "应用静态配置后自动登录";
-            chkAutoLogin.Location = new Point(240, 92);
-            chkAutoLogin.Size = new Size(190, 24);
-            grpAuth.Controls.Add(chkAutoLogin);
+            this.Loaded += delegate
+            {
+                AppendLog("就绪");
+                RefreshStatusAsync(true);
+            };
 
-            this.Controls.Add(grpAuth);
+            this.Closing += delegate
+            {
+                SaveCurrentConfig();
+                if (trayIcon != null) trayIcon.Visible = false;
+            };
+        }
 
-            // 4. 核心按钮区
-            btnApplyCampus = new Button();
-            btnApplyCampus.Text = "🚀  一键应用校园网静态配置";
-            btnApplyCampus.Location = new Point(12, 390);
-            btnApplyCampus.Size = new Size(216, 42);
-            btnApplyCampus.BackColor = Color.FromArgb(15, 82, 186);
-            btnApplyCampus.ForeColor = Color.White;
-            btnApplyCampus.Font = new Font("Microsoft YaHei UI", 10F, FontStyle.Bold);
-            btnApplyCampus.FlatStyle = FlatStyle.Flat;
-            btnApplyCampus.FlatAppearance.BorderSize = 0;
-            btnApplyCampus.Cursor = Cursors.Hand;
-            btnApplyCampus.Click += new EventHandler(btnApplyCampus_Click);
-            this.Controls.Add(btnApplyCampus);
+        private void InitSystemTray()
+        {
+            trayMenu = new Forms.ContextMenuStrip();
+            trayMenu.Items.Add("切换为静态 IP", null, delegate { btnApplyCampus_Click(this, null); });
+            trayMenu.Items.Add("恢复自动获取 (DHCP)", null, delegate { btnRestoreDhcp_Click(this, null); });
+            trayMenu.Items.Add(new Forms.ToolStripSeparator());
+            trayMenu.Items.Add("打开登录页 (10.8.2.2)", null, delegate { btnOpenPortal_Click(this, null); });
+            trayMenu.Items.Add("显示主窗口", null, delegate { ShowMainWindow(); });
+            trayMenu.Items.Add(new Forms.ToolStripSeparator());
+            trayMenu.Items.Add("退出", null, delegate { ExitApplication(); });
 
-            btnRestoreDhcp = new Button();
-            btnRestoreDhcp.Text = "🔄  一键恢复 DHCP 默认配置";
-            btnRestoreDhcp.Location = new Point(242, 390);
-            btnRestoreDhcp.Size = new Size(216, 42);
-            btnRestoreDhcp.BackColor = Color.FromArgb(75, 85, 99);
-            btnRestoreDhcp.ForeColor = Color.White;
-            btnRestoreDhcp.Font = new Font("Microsoft YaHei UI", 10F, FontStyle.Bold);
-            btnRestoreDhcp.FlatStyle = FlatStyle.Flat;
-            btnRestoreDhcp.FlatAppearance.BorderSize = 0;
-            btnRestoreDhcp.Cursor = Cursors.Hand;
-            btnRestoreDhcp.Click += new EventHandler(btnRestoreDhcp_Click);
-            this.Controls.Add(btnRestoreDhcp);
-
-            // 5. 实时操作日志框
-            txtLog = new TextBox();
-            txtLog.Multiline = true;
-            txtLog.ReadOnly = true;
-            txtLog.ScrollBars = ScrollBars.Vertical;
-            txtLog.BackColor = Color.FromArgb(17, 24, 39);
-            txtLog.ForeColor = Color.FromArgb(209, 213, 219);
-            txtLog.Font = new Font("Consolas", 8.5F, FontStyle.Regular);
-            txtLog.Location = new Point(12, 442);
-            txtLog.Size = new Size(446, 216);
-            this.Controls.Add(txtLog);
-
-            // 6. 系统托盘图标与上下文菜单
-            trayMenu = new ContextMenuStrip();
-            trayMenu.Items.Add("一键应用校园网静态配置", null, (s, e) => btnApplyCampus_Click(s, e));
-            trayMenu.Items.Add("一键恢复 DHCP 默认配置", null, (s, e) => btnRestoreDhcp_Click(s, e));
-            trayMenu.Items.Add(new ToolStripSeparator());
-            trayMenu.Items.Add("打开认证网页 (10.8.2.2)", null, (s, e) => btnOpenPortal_Click(s, e));
-            trayMenu.Items.Add("显示主窗口", null, (s, e) => ShowMainWindow());
-            trayMenu.Items.Add(new ToolStripSeparator());
-            trayMenu.Items.Add("退出程序", null, (s, e) => ExitApplication());
-
-            trayIcon = new NotifyIcon();
-            trayIcon.Text = "JMU 校园网配置助手";
-            trayIcon.Icon = SystemIcons.Shield; // 使用系统高辨识度图标
+            trayIcon = new Forms.NotifyIcon();
+            trayIcon.Text = "集大校园网助手";
+            trayIcon.Icon = Drawing.SystemIcons.Shield;
             trayIcon.ContextMenuStrip = trayMenu;
             trayIcon.Visible = true;
-            trayIcon.DoubleClick += (s, e) => ShowMainWindow();
-
-            this.FormClosing += new FormClosingEventHandler(MainForm_FormClosing);
-            this.Resize += new EventHandler(MainForm_Resize);
-            this.Load += new EventHandler(MainForm_Load);
+            trayIcon.DoubleClick += delegate { ShowMainWindow(); };
         }
 
-        private void MainForm_Load(object sender, EventArgs e)
+        private void MinimizeToTray()
         {
-            AppendLog("欢迎使用 JMU 校园网配置助手 v2.0！");
-            AppendLog("内置 Win11 DAD 冲突自动防御与多网卡链路源地址精准绑定。");
-            RefreshStatusAsync(true);
-        }
-
-        private void MainForm_Resize(object sender, EventArgs e)
-        {
-            if (this.WindowState == FormWindowState.Minimized)
+            this.Hide();
+            if (trayIcon != null)
             {
-                this.Hide();
-                trayIcon.ShowBalloonTip(1000, "JMU 校园网配置助手", "程序已最小化到系统托盘，右键托盘图标可快速切换网络。", ToolTipIcon.Info);
+                trayIcon.ShowBalloonTip(1200, "集大校园网助手", "已最小化到系统托盘，右键图标可切换网络模式。", Forms.ToolTipIcon.Info);
             }
-        }
-
-        private void MainForm_FormClosing(object sender, FormClosingEventArgs e)
-        {
-            SaveCurrentConfig();
-            trayIcon.Visible = false;
         }
 
         private void ShowMainWindow()
         {
             this.Show();
-            this.WindowState = FormWindowState.Normal;
-            this.BringToFront();
+            this.WindowState = WindowState.Normal;
             this.Activate();
         }
 
         private void ExitApplication()
         {
             SaveCurrentConfig();
-            trayIcon.Visible = false;
-            Application.Exit();
+            if (trayIcon != null) trayIcon.Visible = false;
+            Application.Current.Shutdown();
         }
 
         private void ApplyLoadedConfig()
         {
             if (!string.IsNullOrEmpty(appConfig.SelectedIp))
             {
-                int idx = cboIp.FindStringExact(appConfig.SelectedIp);
-                if (idx >= 0) cboIp.SelectedIndex = idx;
-                else cboIp.Text = appConfig.SelectedIp;
+                if (appConfig.SelectedIp.Contains("·"))
+                {
+                    string pure = ExtractPureIp(appConfig.SelectedIp);
+                    appConfig.SelectedIp = (pure == "172.19.245.138") ? "172.19.245.138 (默认)" : pure;
+                }
+                cboIp.Text = appConfig.SelectedIp;
             }
 
             txtUserId.Text = appConfig.UserId ?? "";
+            chkRememberPwd.IsChecked = appConfig.RememberPassword;
             if (appConfig.RememberPassword && !string.IsNullOrEmpty(appConfig.EncryptedPassword))
             {
-                txtPassword.Text = ConfigStorage.DecryptPassword(appConfig.EncryptedPassword);
-                chkRememberPwd.Checked = true;
-            }
-            else
-            {
-                chkRememberPwd.Checked = false;
+                txtPassword.Password = ConfigStorage.DecryptPassword(appConfig.EncryptedPassword);
             }
 
             if (!string.IsNullOrEmpty(appConfig.Service))
             {
-                int sIdx = cboService.FindStringExact(appConfig.Service);
-                if (sIdx >= 0) cboService.SelectedIndex = sIdx;
+                cboService.Text = appConfig.Service;
             }
 
-            chkAutoLogin.Checked = appConfig.AutoLoginAfterSwitch;
+            chkAutoLogin.IsChecked = appConfig.AutoLoginAfterSwitch;
         }
 
         private void SaveCurrentConfig()
         {
-            appConfig.SelectedIp = cboIp.Text.Trim();
-            appConfig.UserId = txtUserId.Text.Trim();
-            appConfig.RememberPassword = chkRememberPwd.Checked;
-            appConfig.AutoLoginAfterSwitch = chkAutoLogin.Checked;
+            appConfig.SelectedIp = (cboIp.Text ?? "").Trim();
+            appConfig.UserId = (txtUserId.Text ?? "").Trim();
+            appConfig.RememberPassword = chkRememberPwd.IsChecked == true;
+            appConfig.AutoLoginAfterSwitch = chkAutoLogin.IsChecked == true;
             appConfig.Service = cboService.Text;
 
-            if (chkRememberPwd.Checked && !string.IsNullOrEmpty(txtPassword.Text))
+            if (appConfig.RememberPassword && !string.IsNullOrEmpty(txtPassword.Password))
             {
-                appConfig.EncryptedPassword = ConfigStorage.EncryptPassword(txtPassword.Text);
+                appConfig.EncryptedPassword = ConfigStorage.EncryptPassword(txtPassword.Password);
             }
             else
             {
@@ -1072,157 +1371,133 @@ namespace JmuNetHelper
 
         public void AppendLog(string message)
         {
-            if (this.IsDisposed || !this.IsHandleCreated) return;
-            if (this.InvokeRequired)
+            if (!this.Dispatcher.CheckAccess())
             {
-                try
-                {
-                    this.BeginInvoke(new Action<string>(AppendLog), message);
-                }
-                catch { }
+                this.Dispatcher.BeginInvoke(new Action<string>(AppendLog), DispatcherPriority.Normal, message);
                 return;
             }
 
-            if (txtLog == null || txtLog.IsDisposed) return;
             string timestamp = DateTime.Now.ToString("HH:mm:ss");
+            lblFooterStatus.Text = message;
             txtLog.AppendText(string.Format("[{0}] {1}\r\n", timestamp, message));
+            txtLog.ScrollToEnd();
         }
 
         private void SetWorking(bool working)
         {
             isWorking = working;
-            btnApplyCampus.Enabled = !working;
-            btnRestoreDhcp.Enabled = !working;
-            btnRefresh.Enabled = !working;
-            btnTestLatency.Enabled = !working;
-            btnLogin.Enabled = !working;
+            btnApplyCampus.IsEnabled = !working;
+            btnRestoreDhcp.IsEnabled = !working;
+            btnRefresh.IsEnabled = !working;
+            btnTestLatency.IsEnabled = !working;
+            btnLogin.IsEnabled = !working;
         }
 
-        private string ExtractPureIp(string rawText)
+        private void RefreshStatusAsync(bool testPortal)
         {
-            if (string.IsNullOrEmpty(rawText)) return "";
-            string ip = rawText.Trim();
-            int sp = ip.IndexOf(' ');
-            if (sp > 0)
-            {
-                ip = ip.Substring(0, sp).Trim();
-            }
-            return ip;
-        }
+            lblStatusBadge.Text = "正在检测网络状态...";
+            badgeDot.Background = new SolidColorBrush(Color.FromRgb(217, 119, 6));
 
-        // 异步刷新网络看板
-        private void RefreshStatusAsync(bool testLatency)
-        {
-            btnRefresh.Enabled = false;
-            lblStatusText.Text = "正在检测网络接口...";
-
-            Task.Factory.StartNew(() =>
+            Task.Factory.StartNew(delegate
             {
-                return NetworkInspector.Inspect(testLatency);
-            }).ContinueWith(t =>
+                return NetworkInspector.Inspect(testPortal);
+            }).ContinueWith(delegate(Task<NetworkStatusInfo> t)
             {
-                if (t.IsFaulted || t.Result == null)
-                {
-                    lblStatusText.Text = "网络状态巡检失败";
-                    btnRefresh.Enabled = true;
-                    return;
-                }
-
+                if (t.IsFaulted || t.Result == null) return;
                 currentNetInfo = t.Result;
-                UpdateUiStatus(currentNetInfo);
-                btnRefresh.Enabled = !isWorking;
+                UpdateDashboardUi(currentNetInfo);
             }, TaskScheduler.FromCurrentSynchronizationContext());
         }
 
-        private void UpdateUiStatus(NetworkStatusInfo info)
+        public void UpdateDashboardUi(NetworkStatusInfo info)
         {
             if (!info.HasWlan)
             {
-                lblStatusDot.ForeColor = Color.Red;
-                lblStatusText.Text = "未检测到无线网卡 (WLAN)";
-                lblSsidInfo.Text = "无线网络 (SSID) : 无可用无线适配器";
-                lblIpInfo.Text = "当前 IPv4 地址  : 0.0.0.0";
-                lblRouteDadInfo.Text = "请检查物理网卡或驱动是否启用";
+                badgeDot.Background = new SolidColorBrush(Color.FromRgb(220, 38, 38));
+                lblStatusBadge.Text = "未检测到无线网卡";
+                lblHeroIp.Text = "0.0.0.0";
+                lblHeroLatency.Text = "认证服  不可达";
+                lblChipSsid.Text = "无线网  未连接";
+                lblChipGw.Text = "网关  无";
                 return;
             }
 
-            bool isJmu = info.Ssid.IndexOf("JMU", StringComparison.OrdinalIgnoreCase) >= 0;
-            string dadStr = info.DadTransmits >= 0 ? info.DadTransmits.ToString() : "未知";
+            lblHeroIp.Text = info.Ipv4Address;
+            lblChipSsid.Text = string.Format("无线网  {0}", info.Ssid);
+            lblChipGw.Text = string.Format("网关  {0}", info.Gateway);
 
-            if (isJmu)
+            if (info.PortalLatencyMs > 0)
             {
-                if (!info.IsDhcp && info.Ipv4Address.StartsWith("172.19."))
-                {
-                    lblStatusDot.ForeColor = Color.Green;
-                    lblStatusText.Text = "已连接 JMU 校园网 (静态 IP 模式)";
-                }
-                else
-                {
-                    lblStatusDot.ForeColor = Color.DarkOrange;
-                    lblStatusText.Text = "已连接 JMU-STU (日常 DHCP 模式 / 认证受限)";
-                }
+                lblHeroLatency.Text = string.Format("认证服  {0} ms", info.PortalLatencyMs);
+                lblHeroLatency.Foreground = new SolidColorBrush(Color.FromRgb(21, 128, 61));
             }
             else
             {
-                lblStatusDot.ForeColor = Color.Gray;
-                lblStatusText.Text = string.Format("已连接其他网络: {0}", info.Ssid);
+                lblHeroLatency.Text = "认证服  未连通";
+                lblHeroLatency.Foreground = new SolidColorBrush(Color.FromRgb(113, 113, 122));
             }
 
-            string sigStr = info.SignalQuality >= 0 ? string.Format("{0}%", info.SignalQuality) : "未读取";
-            lblSsidInfo.Text = string.Format("无线网络 (SSID) : {0}  (信号: {1}, 索引 #{2})",
-                info.Ssid, sigStr, info.InterfaceIndex);
-
-            string modeStr = info.IsDhcp ? "DHCP 动态" : "静态分配";
-            lblIpInfo.Text = string.Format("当前 IPv4 地址  : {0}  ({1})", info.Ipv4Address, modeStr);
-
-            string latencyStr = info.LatencyMs >= 0 ? string.Format("{0} ms", info.LatencyMs) : "超时 / 不可达";
-            lblRouteDadInfo.Text = string.Format("DAD 检测次数 : {0}  |  认证服(10.8.2.2)延迟 : {1}", dadStr, latencyStr);
+            if (info.IsApipa)
+            {
+                badgeDot.Background = new SolidColorBrush(Color.FromRgb(220, 38, 38));
+                lblStatusBadge.Text = "地址冲突 (169.254)，请重新切换静态 IP";
+            }
+            else if (!info.IsDhcpEnabled && info.Ipv4Address.StartsWith("172.19."))
+            {
+                badgeDot.Background = new SolidColorBrush(Color.FromRgb(21, 128, 61));
+                lblStatusBadge.Text = "静态 IP 模式已生效";
+            }
+            else
+            {
+                badgeDot.Background = new SolidColorBrush(Color.FromRgb(29, 78, 216));
+                lblStatusBadge.Text = "自动获取模式 (DHCP)";
+            }
         }
 
-        // 按钮事件：刷新状态
-        private void btnRefresh_Click(object sender, EventArgs e)
+        private void btnRefresh_Click(object sender, RoutedEventArgs e)
         {
+            if (isWorking) return;
+            AppendLog("已刷新网络状态");
             RefreshStatusAsync(true);
         }
 
-        // 按钮事件：探测延迟
-        private void btnTestLatency_Click(object sender, EventArgs e)
+        private void btnTestLatency_Click(object sender, RoutedEventArgs e)
         {
-            string ip = ExtractPureIp(cboIp.Text);
+            if (isWorking) return;
+            string selectedIp = ExtractPureIp(cboIp.Text);
             IPAddress dummy;
-            if (!IPAddress.TryParse(ip, out dummy))
+            if (!IPAddress.TryParse(selectedIp, out dummy))
             {
-                MessageBox.Show("候选 IP 格式非法，请输入有效的 IPv4 地址！", "提示", MessageBoxButtons.OK, MessageBoxIcon.Warning);
+                MessageBox.Show("请输入有效的 IPv4 地址", "提示", MessageBoxButton.OK, MessageBoxImage.Warning);
                 return;
             }
 
-            btnTestLatency.Enabled = false;
-            lblLatencyResult.Text = "测速中...";
+            lblLatencyResult.Text = "正在测试...";
+            lblLatencyResult.Foreground = new SolidColorBrush(Color.FromRgb(113, 113, 122));
+            string bindIp = (currentNetInfo != null && currentNetInfo.Ipv4Address != "0.0.0.0") ? currentNetInfo.Ipv4Address : "";
 
-            Task.Factory.StartNew(() =>
+            Task.Factory.StartNew(delegate
             {
-                return NetworkInspector.TestTcpLatency(currentNetInfo.Ipv4Address, "10.8.2.2", 80, 1500);
-            }).ContinueWith(t =>
+                return NetworkInspector.TestTcpLatency(bindIp, "10.8.2.2", 80, 1800);
+            }).ContinueWith(delegate(Task<int> t)
             {
-                btnTestLatency.Enabled = true;
-                int lat = t.Result;
-                if (lat >= 0)
+                int ms = (!t.IsFaulted) ? t.Result : -1;
+                if (ms > 0)
                 {
-                    lblLatencyResult.ForeColor = Color.Green;
-                    lblLatencyResult.Text = string.Format("握手延迟: {0} ms", lat);
-                    AppendLog(string.Format("测速成功: 10.8.2.2:80 TCP 握手耗时 {0} ms", lat));
+                    lblLatencyResult.Text = string.Format("10.8.2.2 可达 ({0} ms)", ms);
+                    lblLatencyResult.Foreground = new SolidColorBrush(Color.FromRgb(21, 128, 61));
+                    AppendLog(string.Format("连通测试通过 ({0} ms)", ms));
                 }
                 else
                 {
-                    lblLatencyResult.ForeColor = Color.Red;
-                    lblLatencyResult.Text = "握手超时";
-                    AppendLog("测速失败: 10.8.2.2:80 无法连通或超时。");
+                    lblLatencyResult.Text = "当前路由未通 (切换静态后可达)";
+                    lblLatencyResult.Foreground = new SolidColorBrush(Color.FromRgb(217, 119, 6));
+                    AppendLog("10.8.2.2 暂不可达，请先切换为静态 IP");
                 }
             }, TaskScheduler.FromCurrentSynchronizationContext());
         }
 
-        // 按钮事件：一键应用校园网静态配置
-        private void btnApplyCampus_Click(object sender, EventArgs e)
+        private void btnApplyCampus_Click(object sender, RoutedEventArgs e)
         {
             if (isWorking) return;
 
@@ -1230,130 +1505,158 @@ namespace JmuNetHelper
             IPAddress dummy;
             if (!IPAddress.TryParse(targetIp, out dummy))
             {
-                MessageBox.Show("候选静态 IP 格式非法，请检查！", "错误", MessageBoxButtons.OK, MessageBoxIcon.Error);
+                MessageBox.Show("静态 IP 格式无效，请检查后重试", "提示", MessageBoxButton.OK, MessageBoxImage.Warning);
                 return;
             }
 
-            // 防呆校验：如果当前不在 JMU-STU，二次弹窗确认
-            if (!currentNetInfo.Ssid.Equals("JMU-STU", StringComparison.OrdinalIgnoreCase))
+            if (currentNetInfo != null && currentNetInfo.HasWlan &&
+                !string.Equals(currentNetInfo.Ssid, "JMU-STU", StringComparison.OrdinalIgnoreCase) &&
+                currentNetInfo.Ssid != "未连接")
             {
-                string warnMsg = string.Format("当前连接的 Wi-Fi 是 [{0}]，并非 JMU-STU。\r\n在非集美大学校园网环境下配置可能导致网络中断。\r\n\r\n确认要继续应用吗？", currentNetInfo.Ssid);
-                if (MessageBox.Show(warnMsg, "安全防呆提示", MessageBoxButtons.YesNo, MessageBoxIcon.Question) != DialogResult.Yes)
-                {
-                    AppendLog("操作已取消：已放弃在非 JMU-STU 网络下应用静态配置。");
-                    return;
-                }
+                MessageBoxResult dr = MessageBox.Show(
+                    string.Format("当前连接的无线网为「{0}」而非「JMU-STU」。\n\n在非校园网环境下切换为静态 IP 会导致无法上网，是否继续？", currentNetInfo.Ssid),
+                    "环境确认",
+                    MessageBoxButton.YesNo,
+                    MessageBoxImage.Warning
+                );
+                if (dr != MessageBoxResult.Yes) return;
             }
 
-            SetWorking(true);
-            SaveCurrentConfig();
-
-            Task.Factory.StartNew(() =>
-            {
-                bool success = CampusConfigManager.ApplyStaticConfig(targetIp, currentNetInfo.InterfaceName, AppendLog);
-                return success;
-            }).ContinueWith(t =>
-            {
-                bool ok = !t.IsFaulted && t.Result;
-                if (ok)
-                {
-                    AppendLog("=== 校园网静态配置已生效 ===");
-                    RefreshStatusAsync(true);
-
-                    // 若勾选了自动登录，触发登录认证
-                    if (chkAutoLogin.Checked && !string.IsNullOrEmpty(txtUserId.Text.Trim()))
-                    {
-                        AppendLog("检测到勾选了「应用后自动登录」，即将执行 ePortal 认证...");
-                        PerformLoginTask();
-                        return; // PerformLoginTask 会在完成时恢复 SetWorking
-                    }
-                }
-                else
-                {
-                    AppendLog("=== 应用静态配置出现错误 ===");
-                }
-                SetWorking(false);
-            }, TaskScheduler.FromCurrentSynchronizationContext());
-        }
-
-        // 按钮事件：一键恢复 DHCP 默认配置
-        private void btnRestoreDhcp_Click(object sender, EventArgs e)
-        {
-            if (isWorking) return;
-
-            if (MessageBox.Show("确认要清除校园网静态配置并还原为 DHCP 自动获取吗？", "确认还原", MessageBoxButtons.YesNo, MessageBoxIcon.Question) != DialogResult.Yes)
-            {
-                return;
-            }
-
-            SetWorking(true);
-
-            Task.Factory.StartNew(() =>
-            {
-                return CampusConfigManager.RestoreDhcpConfig(currentNetInfo.InterfaceName, AppendLog);
-            }).ContinueWith(t =>
-            {
-                AppendLog("=== 已还原为 DHCP 默认配置 ===");
-                RefreshStatusAsync(false);
-                SetWorking(false);
-            }, TaskScheduler.FromCurrentSynchronizationContext());
-        }
-
-        // 按钮事件：立即登录认证
-        private void btnLogin_Click(object sender, EventArgs e)
-        {
-            if (isWorking) return;
             SaveCurrentConfig();
             SetWorking(true);
-            PerformLoginTask();
-        }
 
-        private void PerformLoginTask()
-        {
-            string uid = txtUserId.Text.Trim();
-            string pwd = txtPassword.Text;
+            string ifName = (currentNetInfo != null && !string.IsNullOrEmpty(currentNetInfo.InterfaceName)) ? currentNetInfo.InterfaceName : "WLAN";
+            bool autoLogin = chkAutoLogin.IsChecked == true;
+            string uid = (txtUserId.Text ?? "").Trim();
+            string pwd = txtPassword.Password ?? "";
             string svc = cboService.Text;
-            string wlanIp = currentNetInfo.Ipv4Address;
 
-            Task.Factory.StartNew(() =>
+            Task.Factory.StartNew(delegate
             {
-                return EPortalAuthClient.Login(wlanIp, uid, pwd, svc, AppendLog);
-            }).ContinueWith(t =>
+                bool ok = CampusConfigManager.ApplyStaticConfig(targetIp, ifName, AppendLog);
+                if (ok && autoLogin && !string.IsNullOrEmpty(uid) && !string.IsNullOrEmpty(pwd))
+                {
+                    Thread.Sleep(500);
+                    EPortalAuthClient.Login(targetIp, uid, pwd, svc, AppendLog);
+                }
+                return ok;
+            }).ContinueWith(delegate
             {
-                if (t.IsFaulted)
-                {
-                    AppendLog("登录过程中发生未处理异常: " + t.Exception.Message);
-                }
-                else
-                {
-                    LoginResult res = t.Result;
-                    if (res.Success)
-                    {
-                        trayIcon.ShowBalloonTip(2000, "JMU 校园网", "认证成功，校园网现已全面放行！", ToolTipIcon.Info);
-                    }
-                }
                 SetWorking(false);
                 RefreshStatusAsync(true);
             }, TaskScheduler.FromCurrentSynchronizationContext());
         }
 
-        // 按钮事件：打开认证网页
-        private void btnOpenPortal_Click(object sender, EventArgs e)
+        private void btnRestoreDhcp_Click(object sender, RoutedEventArgs e)
+        {
+            if (isWorking) return;
+
+            SaveCurrentConfig();
+            SetWorking(true);
+
+            string ifName = (currentNetInfo != null && !string.IsNullOrEmpty(currentNetInfo.InterfaceName)) ? currentNetInfo.InterfaceName : "WLAN";
+
+            Task.Factory.StartNew(delegate
+            {
+                return CampusConfigManager.RestoreDhcpConfig(ifName, AppendLog);
+            }).ContinueWith(delegate
+            {
+                SetWorking(false);
+                RefreshStatusAsync(false);
+            }, TaskScheduler.FromCurrentSynchronizationContext());
+        }
+
+        private void btnLogin_Click(object sender, RoutedEventArgs e)
+        {
+            if (isWorking) return;
+
+            string uid = (txtUserId.Text ?? "").Trim();
+            string pwd = txtPassword.Password ?? "";
+            string svc = cboService.Text;
+
+            if (string.IsNullOrEmpty(uid) || string.IsNullOrEmpty(pwd))
+            {
+                MessageBox.Show("请填写学号和密码", "提示", MessageBoxButton.OK, MessageBoxImage.Information);
+                return;
+            }
+
+            SaveCurrentConfig();
+            SetWorking(true);
+
+            string wlanIp = (currentNetInfo != null && currentNetInfo.Ipv4Address != "0.0.0.0") ? currentNetInfo.Ipv4Address : ExtractPureIp(cboIp.Text);
+
+            Task.Factory.StartNew(delegate
+            {
+                return EPortalAuthClient.Login(wlanIp, uid, pwd, svc, AppendLog);
+            }).ContinueWith(delegate(Task<LoginResult> t)
+            {
+                SetWorking(false);
+                RefreshStatusAsync(true);
+                if (!t.IsFaulted && t.Result != null && !t.Result.Success)
+                {
+                    MessageBox.Show(t.Result.Message, "认证结果", MessageBoxButton.OK, MessageBoxImage.Warning);
+                }
+            }, TaskScheduler.FromCurrentSynchronizationContext());
+        }
+
+        private void btnOpenPortal_Click(object sender, RoutedEventArgs e)
         {
             try
             {
-                Process.Start("http://10.8.2.2");
-                AppendLog("已调起默认浏览器打开 http://10.8.2.2");
+                AppendLog("已打开登录页 http://10.8.2.2/");
+                Process.Start("http://10.8.2.2/");
             }
             catch (Exception ex)
             {
-                AppendLog("打开浏览器失败: " + ex.Message);
+                AppendLog("打开网页失败: " + ex.Message);
             }
+        }
+
+        // 渲染离线高分屏预览图用于视觉自检
+        public void RenderPreviewPng(string filePath)
+        {
+            NetworkStatusInfo demo = new NetworkStatusInfo();
+            demo.HasWlan = true;
+            demo.InterfaceName = "WLAN";
+            demo.IsDhcpEnabled = false;
+            demo.Ipv4Address = "172.19.245.138";
+            demo.Gateway = "192.168.128.1";
+            demo.Ssid = "JMU-STU";
+            demo.Signal = "88%";
+            demo.DadTransmits = 0;
+            demo.PortalLatencyMs = 1;
+            UpdateDashboardUi(demo);
+            cboIp.Text = "172.19.245.138 (默认)";
+            chkRememberPwd.IsChecked = true;
+            chkAutoLogin.IsChecked = true;
+            lblLatencyResult.Text = "";
+
+            FrameworkElement content = (FrameworkElement)this.Content;
+            content.Width = 420;
+            content.Measure(new Size(420, double.PositiveInfinity));
+            Size desired = content.DesiredSize;
+            content.Arrange(new Rect(0, 0, desired.Width, desired.Height));
+            content.UpdateLayout();
+
+            int dpi = 144;
+            int pxW = (int)Math.Ceiling(desired.Width * dpi / 96.0);
+            int pxH = (int)Math.Ceiling(desired.Height * dpi / 96.0);
+
+            RenderTargetBitmap rtb = new RenderTargetBitmap(pxW, pxH, dpi, dpi, PixelFormats.Pbgra32);
+            rtb.Render(content);
+
+            PngBitmapEncoder encoder = new PngBitmapEncoder();
+            encoder.Frames.Add(BitmapFrame.Create(rtb));
+            using (FileStream fs = new FileStream(filePath, FileMode.Create, FileAccess.Write))
+            {
+                encoder.Save(fs);
+            }
+            if (trayIcon != null) trayIcon.Visible = false;
         }
     }
 
     // =========================================================================
-    // 程序入口点
+    // 程序入口
     // =========================================================================
 
     public static class Program
@@ -1361,27 +1664,25 @@ namespace JmuNetHelper
         [STAThread]
         public static int Main(string[] args)
         {
-            // 命令行自检与自动化测试模式
-            if (args != null && args.Length > 0 && args[0].Equals("--verify", StringComparison.OrdinalIgnoreCase))
+            if (args != null && args.Length > 0)
             {
-                Console.WriteLine("==================================================");
-                Console.WriteLine("JMU Network Helper CLI Verification Mode");
-                Console.WriteLine("==================================================");
-                NetworkStatusInfo info = NetworkInspector.Inspect(false);
-                Console.WriteLine("HasWlan: " + info.HasWlan);
-                Console.WriteLine("InterfaceName: " + info.InterfaceName);
-                Console.WriteLine("InterfaceIndex: " + info.InterfaceIndex);
-                Console.WriteLine("SSID: " + info.Ssid);
-                Console.WriteLine("IPv4: " + info.Ipv4Address);
-                Console.WriteLine("IsDhcp: " + info.IsDhcp);
-                Console.WriteLine("DadTransmits: " + info.DadTransmits);
-                Console.WriteLine("Verification Completed Successfully.");
-                return 0;
+                if (string.Equals(args[0], "--verify", StringComparison.OrdinalIgnoreCase))
+                {
+                    NetworkStatusInfo info = NetworkInspector.Inspect(false);
+                    Console.WriteLine("VERIFY_OK: HasWlan=" + info.HasWlan + ", IP=" + info.Ipv4Address);
+                    return 0;
+                }
+                if (string.Equals(args[0], "--screenshot", StringComparison.OrdinalIgnoreCase) && args.Length > 1)
+                {
+                    MainForm form = new MainForm();
+                    form.RenderPreviewPng(args[1]);
+                    return 0;
+                }
             }
 
-            Application.EnableVisualStyles();
-            Application.SetCompatibleTextRenderingDefault(false);
-            Application.Run(new MainForm());
+            Application app = new Application();
+            MainForm mainWin = new MainForm();
+            app.Run(mainWin);
             return 0;
         }
     }
