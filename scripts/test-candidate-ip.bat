@@ -41,15 +41,16 @@ echo [1/5] 关闭 WLAN 接口 DAD 冲突检测 (dadtransmits=0)...
 netsh interface ipv4 set interface "WLAN" dadtransmits=0
 
 echo [2/5] 正在配置 WLAN 静态 IP: !TEST_IP! ...
-netsh interface ip set address name="WLAN" static !TEST_IP! 255.255.255.0 192.168.128.1
-netsh interface ip set dns name="WLAN" static 172.17.8.32 primary
-netsh interface ip add dns name="WLAN" 172.17.8.33 index=2
-
-echo [3/5] 写入定向测试路由...
 route delete 10.0.0.0 >nul 2>&1
 route delete 172.17.0.0 >nul 2>&1
+route delete 0.0.0.0 mask 0.0.0.0 192.168.128.1 >nul 2>&1
+netsh interface ip set address name="WLAN" static !TEST_IP! 255.255.255.0 192.168.128.1
+
+echo [3/5] 写入定向测试路由与 DNS (validate=no)...
 netsh interface ipv4 add route prefix=10.0.0.0/8 interface="WLAN" nexthop=192.168.128.1 metric=1 store=active
 netsh interface ipv4 add route prefix=172.17.0.0/16 interface="WLAN" nexthop=192.168.128.1 metric=1 store=active
+netsh interface ip set dns name="WLAN" static 172.17.8.32 primary validate=no
+netsh interface ip add dns name="WLAN" 172.17.8.33 index=2 validate=no
 
 echo [4/5] 等待网卡生效 (约 2 秒)...
 ping -n 3 127.0.0.1 >nul

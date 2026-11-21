@@ -19,10 +19,10 @@ echo ============================================================
 echo.
 echo  将要执行的操作：
 echo    [1] 恢复网卡默认 DAD 冲突检测 (dadtransmits=3)
-echo    [2] WLAN 网卡改为 DHCP 自动获取 IP 地址
-echo    [3] WLAN 的 DNS 改为自动获取
-echo    [4] 删除校园网专用路由  10.0.0.0/8 和 172.17.0.0/16
-echo    [5] 删除持久默认路由    0.0.0.0 -^> 192.168.128.1
+echo    [2] 删除校园网专用路由  10.0.0.0/8 和 172.17.0.0/16
+echo    [3] 删除持久默认路由    0.0.0.0 -^> 192.168.128.1
+echo    [4] WLAN 网卡与 DNS 改为 DHCP 自动获取
+echo    [5] 刷新 DHCP 租约
 echo.
 echo  适用场景：
 echo    - 要离开校园网、去连别的 WiFi 了
@@ -45,20 +45,21 @@ echo ------------------------------------------------------------
 echo [1/5] 恢复网卡默认 DAD 冲突检测 (dadtransmits=3)...
 netsh interface ipv4 set interface "WLAN" dadtransmits=3 >nul 2>&1
 
-echo [2/5] WLAN 改为 DHCP 自动获取...
-netsh interface ip set address name="WLAN" dhcp
-netsh interface ip set dns name="WLAN" dhcp
-
-echo [3/5] 刷新 DHCP 租约，请稍候...
-ipconfig /renew "WLAN" >nul 2>&1
-ping -n 5 127.0.0.1 >nul
-
-echo [4/5] 删除校园网专用路由...
+echo [2/5] 删除校园网专用路由...
 route delete 10.0.0.0 >nul 2>&1
 route delete 172.17.0.0 >nul 2>&1
 
-echo [5/5] 删除持久默认路由...
+echo [3/5] 删除持久默认路由...
 route delete 0.0.0.0 mask 0.0.0.0 192.168.128.1 >nul 2>&1
+route delete 0.0.0.0 mask 0.0.0.0 172.19.0.1 >nul 2>&1
+
+echo [4/5] WLAN 改为 DHCP 自动获取...
+netsh interface ip set address name="WLAN" dhcp
+netsh interface ip set dns name="WLAN" dhcp
+
+echo [5/5] 刷新 DHCP 租约，请稍候...
+ipconfig /renew "WLAN" >nul 2>&1
+ping -n 5 127.0.0.1 >nul
 
 echo.
 echo ============================================================

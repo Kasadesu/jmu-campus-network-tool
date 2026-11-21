@@ -368,6 +368,79 @@ namespace JmuNetHelper
             }
             return -1;
         }
+
+        public static bool TestUdpDnsReachability(string bindIp, string dnsServer, int timeoutMs)
+        {
+            try
+            {
+                using (Socket sock = new Socket(AddressFamily.InterNetwork, SocketType.Dgram, ProtocolType.Udp))
+                {
+                    sock.SendTimeout = timeoutMs;
+                    sock.ReceiveTimeout = timeoutMs;
+
+                    if (!string.IsNullOrEmpty(bindIp) && bindIp != "0.0.0.0" && !bindIp.StartsWith("169.254."))
+                    {
+                        IPAddress localAddr;
+                        if (IPAddress.TryParse(bindIp, out localAddr))
+                        {
+                            sock.Bind(new IPEndPoint(localAddr, 0));
+                        }
+                    }
+
+                    // 标准 DNS A 记录查询报文: www.jmu.edu.cn (Transaction ID 0x1337)
+                    byte[] query = new byte[]
+                    {
+                        0x13, 0x37, 0x01, 0x00, 0x00, 0x01, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00,
+                        0x03, (byte)'w', (byte)'w', (byte)'w',
+                        0x03, (byte)'j', (byte)'m', (byte)'u',
+                        0x03, (byte)'e', (byte)'d', (byte)'u',
+                        0x02, (byte)'c', (byte)'n',
+                        0x00,
+                        0x00, 0x01, 0x00, 0x01
+                    };
+
+                    EndPoint remoteEp = new IPEndPoint(IPAddress.Parse(dnsServer), 53);
+                    sock.SendTo(query, remoteEp);
+
+                    byte[] recvBuf = new byte[512];
+                    EndPoint fromEp = new IPEndPoint(IPAddress.Any, 0);
+                    int read = sock.ReceiveFrom(recvBuf, ref fromEp);
+                    return read >= 12 && recvBuf[0] == 0x13 && recvBuf[1] == 0x37;
+                }
+            }
+            catch
+            {
+                return false;
+            }
+        }
+
+        public static bool WaitForInterfaceIp(string expectedIp, bool expectDhcp, int maxWaitMs)
+        {
+            Stopwatch sw = Stopwatch.StartNew();
+            while (sw.ElapsedMilliseconds < maxWaitMs)
+            {
+                NetworkStatusInfo info = Inspect(false);
+                if (info != null && info.HasWlan)
+                {
+                    if (expectDhcp)
+                    {
+                        if (info.IsDhcpEnabled && !info.IsApipa && info.Ipv4Address != "0.0.0.0" && !info.Ipv4Address.StartsWith("172.19."))
+                        {
+                            return true;
+                        }
+                    }
+                    else if (!string.IsNullOrEmpty(expectedIp))
+                    {
+                        if (string.Equals(info.Ipv4Address, expectedIp, StringComparison.OrdinalIgnoreCase) && !info.IsApipa)
+                        {
+                            return true;
+                        }
+                    }
+                }
+                Thread.Sleep(250);
+            }
+            return false;
+        }
     }
 
     // =========================================================================
@@ -391,11 +464,20 @@ namespace JmuNetHelper
 
                 using (Process proc = Process.Start(psi))
                 {
+                    object syncLock = new object();
                     StringBuilder sbOut = new StringBuilder();
-                    proc.OutputDataReceived += delegate(object s, DataReceivedEventArgs e)
+                    DataReceivedEventHandler handler = delegate(object s, DataReceivedEventArgs e)
                     {
-                        if (e.Data != null) sbOut.AppendLine(e.Data);
+                        if (e.Data != null)
+                        {
+                            lock (syncLock)
+                            {
+                                sbOut.AppendLine(e.Data);
+                            }
+                        }
                     };
+                    proc.OutputDataReceived += handler;
+                    proc.ErrorDataReceived += handler;
                     proc.BeginOutputReadLine();
                     proc.BeginErrorReadLine();
                     if (!proc.WaitForExit(15000))
@@ -405,7 +487,10 @@ namespace JmuNetHelper
                         return false;
                     }
                     proc.WaitForExit();
-                    stdout = sbOut.ToString();
+                    lock (syncLock)
+                    {
+                        stdout = sbOut.ToString();
+                    }
                     return proc.ExitCode == 0;
                 }
             }
@@ -423,9 +508,11 @@ namespace JmuNetHelper
 
             log(string.Format("开始应用静态 IP 配置 ({0}, 接口 {1})", staticIp, ifName));
 
-            log("正在清理旧路由表项...");
+            log("正在清理旧路由与残留网关表项...");
             RunCmd("route", "delete 10.0.0.0", out output);
             RunCmd("route", "delete 172.17.0.0", out output);
+            RunCmd("route", "delete 0.0.0.0 mask 0.0.0.0 192.168.128.1", out output);
+            RunCmd("route", "delete 0.0.0.0 mask 0.0.0.0 172.19.0.1", out output);
 
             log("正在设置网卡 dadtransmits=0...");
             string dadArgs = string.Format("interface ipv4 set interface \"{0}\" dadtransmits=0", ifName);
@@ -443,11 +530,11 @@ namespace JmuNetHelper
             RunCmd("netsh", string.Format("interface ipv4 add route prefix=10.0.0.0/8 interface=\"{0}\" nexthop=192.168.128.1 metric=1 store=persistent", ifName), out output);
             RunCmd("netsh", string.Format("interface ipv4 add route prefix=172.17.0.0/16 interface=\"{0}\" nexthop=192.168.128.1 metric=1 store=persistent", ifName), out output);
 
-            log("正在配置校园网 DNS (172.17.8.32 / 172.17.8.33)...");
+            log("正在配置校园网 DNS (172.17.8.32 / 172.17.8.33, 免校验模式)...");
             RunCmd("netsh", string.Format("interface ip set dns name=\"{0}\" static 172.17.8.32 primary validate=no", ifName), out output);
             RunCmd("netsh", string.Format("interface ip add dns name=\"{0}\" 172.17.8.33 index=2 validate=no", ifName), out output);
 
-            Thread.Sleep(500);
+            NetworkInspector.WaitForInterfaceIp(staticIp, false, 3500);
             log("已切换为静态 IP 模式");
             return true;
         }
@@ -462,19 +549,20 @@ namespace JmuNetHelper
             log("正在还原 dadtransmits=3...");
             RunCmd("netsh", string.Format("interface ipv4 set interface \"{0}\" dadtransmits=3", ifName), out output);
 
-            log("正在切换 IPv4 与 DNS 为自动获取...");
-            RunCmd("netsh", string.Format("interface ip set address name=\"{0}\" dhcp", ifName), out output);
-            RunCmd("netsh", string.Format("interface ip set dns name=\"{0}\" dhcp", ifName), out output);
-
             log("正在清理静态路由表项...");
             RunCmd("route", "delete 10.0.0.0", out output);
             RunCmd("route", "delete 172.17.0.0", out output);
             RunCmd("route", "delete 0.0.0.0 mask 0.0.0.0 192.168.128.1", out output);
+            RunCmd("route", "delete 0.0.0.0 mask 0.0.0.0 172.19.0.1", out output);
+
+            log("正在切换 IPv4 与 DNS 为自动获取...");
+            RunCmd("netsh", string.Format("interface ip set address name=\"{0}\" dhcp", ifName), out output);
+            RunCmd("netsh", string.Format("interface ip set dns name=\"{0}\" dhcp", ifName), out output);
 
             log("正在刷新 DHCP 租约...");
             RunCmd("ipconfig", string.Format("/renew \"{0}\"", ifName), out output);
 
-            Thread.Sleep(500);
+            NetworkInspector.WaitForInterfaceIp("", true, 3500);
             log("已恢复自动获取 (DHCP)");
             return true;
         }
@@ -507,7 +595,7 @@ namespace JmuNetHelper
                 socket.SendTimeout = timeoutMs;
                 socket.ReceiveTimeout = timeoutMs;
 
-                if (!string.IsNullOrEmpty(localIp) && localIp != "0.0.0.0")
+                if (!string.IsNullOrEmpty(localIp) && localIp != "0.0.0.0" && !localIp.StartsWith("169.254."))
                 {
                     IPAddress local;
                     if (IPAddress.TryParse(localIp, out local))
@@ -545,43 +633,87 @@ namespace JmuNetHelper
             }
         }
 
+        private static string ExtractWlanQueryFromResponse(string resp)
+        {
+            if (string.IsNullOrEmpty(resp)) return "";
+            Match m = Regex.Match(resp, @"wlanuserip=[^'""\r\n\s<>]+", RegexOptions.IgnoreCase);
+            if (m.Success)
+            {
+                return m.Value.TrimEnd('\'', '"', '>', '<');
+            }
+            return "";
+        }
+
         public static string DetectQueryString(string wlanIp, Action<string> log)
         {
-            try
-            {
-                log("正在获取网关认证参数...");
-                string req = "GET / HTTP/1.1\r\nHost: www.baidu.com\r\nUser-Agent: Mozilla/5.0\r\nConnection: close\r\n\r\n";
-                string resp = SendBoundHttpRequest(wlanIp, "110.242.68.66", 80, req, 2500);
+            log("正在获取网关认证参数...");
 
-                Match m = Regex.Match(resp, @"wlanuserip=[a-fA-F0-9]+[^'""\r\n\s<>]*");
-                if (m.Success)
-                {
-                    return m.Value;
-                }
-            }
-            catch
+            string[,] externalProbes = new string[,]
             {
+                { "1.1.1.1", "1.1.1.1" },
+                { "123.123.123.123", "123.123.123.123" },
+                { "110.242.68.66", "www.baidu.com" }
+            };
+
+            for (int i = 0; i < externalProbes.GetLength(0); i++)
+            {
+                string hostIp = externalProbes[i, 0];
+                string hostHeader = externalProbes[i, 1];
+                try
+                {
+                    string req = string.Format("GET / HTTP/1.1\r\nHost: {0}\r\nUser-Agent: Mozilla/5.0\r\nConnection: close\r\n\r\n", hostHeader);
+                    string resp = SendBoundHttpRequest(wlanIp, hostIp, 80, req, 2000);
+                    string qs = ExtractWlanQueryFromResponse(resp);
+                    if (!string.IsNullOrEmpty(qs))
+                    {
+                        return qs;
+                    }
+                    if (!string.IsNullOrEmpty(resp) &&
+                        resp.StartsWith("HTTP/1.", StringComparison.OrdinalIgnoreCase) &&
+                        hostIp != "123.123.123.123" &&
+                        resp.IndexOf("10.8.2.2", StringComparison.OrdinalIgnoreCase) < 0 &&
+                        resp.IndexOf("eportal", StringComparison.OrdinalIgnoreCase) < 0 &&
+                        resp.IndexOf("123.123.123.123", StringComparison.OrdinalIgnoreCase) < 0)
+                    {
+                        return "ALREADY_ONLINE";
+                    }
+                }
+                catch
+                {
+                }
             }
 
             try
             {
                 string req2 = "GET / HTTP/1.1\r\nHost: 10.8.2.2\r\nUser-Agent: Mozilla/5.0\r\nConnection: close\r\n\r\n";
-                string resp2 = SendBoundHttpRequest(wlanIp, "10.8.2.2", 80, req2, 2500);
+                string resp2 = SendBoundHttpRequest(wlanIp, "10.8.2.2", 80, req2, 2200);
+                string qs2 = ExtractWlanQueryFromResponse(resp2);
+                if (!string.IsNullOrEmpty(qs2))
+                {
+                    return qs2;
+                }
+
                 if (resp2.IndexOf("redirectortosuccess", StringComparison.OrdinalIgnoreCase) >= 0)
                 {
-                    return "ALREADY_ONLINE";
-                }
-                Match m2 = Regex.Match(resp2, @"wlanuserip=[^'""\r\n\s<>]+");
-                if (m2.Success)
-                {
-                    return m2.Value;
+                    string req3 = "GET /eportal/redirectortosuccess.jsp HTTP/1.1\r\nHost: 10.8.2.2\r\nUser-Agent: Mozilla/5.0\r\nConnection: close\r\n\r\n";
+                    string resp3 = SendBoundHttpRequest(wlanIp, "10.8.2.2", 80, req3, 2200);
+                    string qs3 = ExtractWlanQueryFromResponse(resp3);
+                    if (!string.IsNullOrEmpty(qs3))
+                    {
+                        return qs3;
+                    }
+                    if (resp3.IndexOf("success.jsp", StringComparison.OrdinalIgnoreCase) >= 0 &&
+                        resp3.IndexOf("userIndex=", StringComparison.OrdinalIgnoreCase) >= 0)
+                    {
+                        return "ALREADY_ONLINE";
+                    }
                 }
             }
             catch
             {
             }
 
-            return "wlanuserip=ed1be63a03ba8b2aabc95d26aa1d3c1b&wlanacname=355747ff48f3a490&ssid=&nasip=365cfa093433e323e7089c2f8c88d379&snmpagentip=&mac=54ce951f3f8944dc765200b3bc0e538a&t=wireless-v2&url=7a5a429a7f70b8e11ea0d490d7ca380c7ed76d57a168b632&apmac=&nasid=355747ff48f3a490&vid=5ac9f74de1a810a1&port=713afa334311d259&nasportid=f68f49623ce287a761ed82150260f5b513e3b728a1754f18b152a75109234121";
+            return "";
         }
 
         public static LoginResult Login(string wlanIp, string userId, string password, string serviceName, Action<string> log)
@@ -598,6 +730,12 @@ namespace JmuNetHelper
                 {
                     log("当前设备已在线，无需重复登录");
                     return new LoginResult(true, "当前设备已在线");
+                }
+                if (string.IsNullOrEmpty(qs))
+                {
+                    string msg = "未能获取校园网网关认证参数，请确认已连接 JMU-STU 且当前 IP 受网关响应";
+                    log("认证受阻: " + msg);
+                    return new LoginResult(false, msg);
                 }
 
                 log(string.Format("正在登录认证 ({0}, {1})...", userId, serviceName));
@@ -635,6 +773,14 @@ namespace JmuNetHelper
                 {
                     string successMsg = string.IsNullOrEmpty(messageStr) ? "登录成功" : messageStr;
                     log("认证通过: " + successMsg);
+                    if (NetworkInspector.TestUdpDnsReachability(wlanIp, "172.17.8.32", 1500))
+                    {
+                        log("✓ 校内 DNS (172.17.8.32) 数据链路已放行");
+                    }
+                    else
+                    {
+                        log("⚠ 认证已通过，但当前 IP 到校内 DNS (172.17.8.32) 无响应（可能受网关网段策略或断网时段限制）");
+                    }
                     return new LoginResult(true, successMsg, response);
                 }
                 else
@@ -1591,6 +1737,8 @@ namespace JmuNetHelper
                     string output;
                     CampusConfigManager.RunCmd("route", "delete 10.0.0.0", out output);
                     CampusConfigManager.RunCmd("route", "delete 172.17.0.0", out output);
+                    CampusConfigManager.RunCmd("route", "delete 0.0.0.0 mask 0.0.0.0 192.168.128.1", out output);
+                    CampusConfigManager.RunCmd("route", "delete 0.0.0.0 mask 0.0.0.0 172.19.0.1", out output);
                     CampusConfigManager.RunCmd("netsh", string.Format("interface ipv4 set interface \"{0}\" dadtransmits=0", ifName), out output);
                     CampusConfigManager.RunCmd("netsh", string.Format("interface ipv4 add route prefix=10.0.0.0/8 interface=\"{0}\" nexthop=192.168.128.1 metric=1 store=persistent", ifName), out output);
                     CampusConfigManager.RunCmd("netsh", string.Format("interface ipv4 add route prefix=172.17.0.0/16 interface=\"{0}\" nexthop=192.168.128.1 metric=1 store=persistent", ifName), out output);
@@ -1605,25 +1753,42 @@ namespace JmuNetHelper
                         string ipArgs = string.Format("interface ip set address name=\"{0}\" static {1} 255.255.255.0 192.168.128.1", ifName, pureCand);
                         if (!CampusConfigManager.RunCmd("netsh", ipArgs, out output))
                         {
-                            AppendLog(string.Format("节点 {0} 写入失败，跳过", pureCand));
+                            AppendLog(string.Format("节点 {0} 写入失败: {1}，跳过", pureCand, (output ?? "").Trim()));
                             continue;
                         }
 
-                        Thread.Sleep(200);
+                        NetworkInspector.WaitForInterfaceIp(pureCand, false, 2500);
 
-                        int latency = NetworkInspector.TestTcpLatency(pureCand, "10.8.2.2", 80, 800);
+                        int latency = NetworkInspector.TestTcpLatency(pureCand, "10.8.2.2", 80, 1200);
                         if (latency > 0)
                         {
-                            AppendLog(string.Format("✓ 节点 {0} 路由畅通 (延迟 {1} ms)", pureCand, latency));
+                            bool dnsReachable = NetworkInspector.TestUdpDnsReachability(pureCand, "172.17.8.32", 1200);
+                            if (dnsReachable)
+                            {
+                                AppendLog(string.Format("✓ 节点 {0} 路由与校内 DNS 均畅通 (延迟 {1} ms)", pureCand, latency));
+                            }
+                            else
+                            {
+                                AppendLog(string.Format("节点 {0} 认证服可达 ({1} ms)，但未登录前 DNS 暂未放行，尝试认证校验...", pureCand, latency));
+                            }
+
                             if (autoLogin && !string.IsNullOrEmpty(uid) && !string.IsNullOrEmpty(pwd))
                             {
                                 Thread.Sleep(300);
                                 LoginResult lr = EPortalAuthClient.Login(pureCand, uid, pwd, svc, AppendLog);
                                 if (lr.Success)
                                 {
-                                    AppendLog(string.Format("✓ 自动分配成功并完成认证: {0}", pureCand));
-                                    anySuccess = true;
-                                    break;
+                                    if (dnsReachable || NetworkInspector.TestUdpDnsReachability(pureCand, "172.17.8.32", 1500))
+                                    {
+                                        AppendLog(string.Format("✓ 自动分配成功并完成认证 (数据面已打通): {0}", pureCand));
+                                        anySuccess = true;
+                                        break;
+                                    }
+                                    else
+                                    {
+                                        AppendLog(string.Format("节点 {0} 认证虽通过但数据面/DNS 仍被网关丢包，继续尝试下一个候选...", pureCand));
+                                        continue;
+                                    }
                                 }
                                 else if (lr.Message != null && lr.Message.Contains("密码"))
                                 {
@@ -1638,9 +1803,17 @@ namespace JmuNetHelper
                             }
                             else
                             {
-                                AppendLog(string.Format("✓ 自动分配成功: 已绑定最佳节点 {0}", pureCand));
-                                anySuccess = true;
-                                break;
+                                if (dnsReachable)
+                                {
+                                    AppendLog(string.Format("✓ 自动分配成功: 已绑定最佳节点 {0}", pureCand));
+                                    anySuccess = true;
+                                    break;
+                                }
+                                else
+                                {
+                                    AppendLog(string.Format("节点 {0} 校内 DNS 未响应，继续尝试下一个候选...", pureCand));
+                                    continue;
+                                }
                             }
                         }
                         else
@@ -1651,7 +1824,8 @@ namespace JmuNetHelper
 
                     if (!anySuccess)
                     {
-                        AppendLog("✕ 所有候选节点均未能连通，请检查 Wi-Fi 连接状态");
+                        AppendLog("✕ 所有候选静态节点均未打通数据面，正在自动回滚为 DHCP 自动获取以防断网...");
+                        CampusConfigManager.RestoreDhcpConfig(ifName, AppendLog);
                     }
                     return anySuccess;
                 }
@@ -1708,10 +1882,22 @@ namespace JmuNetHelper
             SaveCurrentConfig();
             SetWorking(true);
 
-            string wlanIp = (currentNetInfo != null && currentNetInfo.Ipv4Address != "0.0.0.0") ? currentNetInfo.Ipv4Address : ExtractPureIp(cboIp.Text);
+            string cboPure = ExtractPureIp(cboIp.Text);
 
             Task.Factory.StartNew(delegate
             {
+                NetworkStatusInfo liveInfo = NetworkInspector.Inspect(false);
+                string wlanIp = (liveInfo != null && !string.IsNullOrEmpty(liveInfo.Ipv4Address) && liveInfo.Ipv4Address != "0.0.0.0" && !liveInfo.IsApipa)
+                    ? liveInfo.Ipv4Address
+                    : "";
+                if (string.IsNullOrEmpty(wlanIp) && !string.IsNullOrEmpty(cboPure) && cboPure != "AUTO")
+                {
+                    IPAddress parsed;
+                    if (IPAddress.TryParse(cboPure, out parsed))
+                    {
+                        wlanIp = cboPure;
+                    }
+                }
                 return EPortalAuthClient.Login(wlanIp, uid, pwd, svc, AppendLog);
             }).ContinueWith(delegate(Task<LoginResult> t)
             {
